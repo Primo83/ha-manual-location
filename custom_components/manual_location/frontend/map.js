@@ -1,6 +1,6 @@
-import { callWS, errorText, geoModels, historyPoints, originalIds, personModels, validateView, zoneModels } from "./data.js?v=0.1.4";
-import { L, makeMap, mapStyles, personIcon, popup, setMapHass } from "./map-common.js?v=0.1.4";
-import { startUpdateCheck } from "./updates.js?v=0.1.4";
+import { callWS, errorText, geoModels, historyPoints, originalIds, personModels, validateView, zoneModels } from "./data.js?v=0.1.5";
+import { L, makeMap, mapStyles, personIcon, popup, setMapHass } from "./map-common.js?v=0.1.5";
+import { startUpdateCheck } from "./updates.js?v=0.1.5";
 
 const COLORS = ["#186d83", "#b05631", "#644f9a", "#42754b", "#a2376b"];
 

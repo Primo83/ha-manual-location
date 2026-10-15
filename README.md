@@ -67,3 +67,6 @@ W widoku panelowym mapa zajmuje pełną dostępną wysokość, także po obrocie
 Po zainstalowaniu nowszej wersji integracji i restarcie HA otwarty interfejs wykrywa wydanie co około 30 sekund oraz po powrocie do widocznej aplikacji. Wczytuje wtedy świeże pliki automatycznie. Przeładowanie jest wstrzymane podczas edycji panelu; może jednokrotnie przywrócić początkowy widok mapy po zmianie wydania. Nie jest to automatyczna instalacja aktualizacji HACS.
 
 Klient z wersją starszą niż 0.1.4 nie ma jeszcze tego mechanizmu: przy pierwszym przejściu może być konieczne zwykłe odświeżenie lub ponowne otwarcie widoku. Zamknięta lub uśpiona aplikacja sprawdza wersję po wznowieniu, gdy odzyska połączenie.
+## Podgląd niezapisanych punktów
+
+Po ustawieniu innych współrzędnych i kliknięciu **Ustaw bieżącą pozycję** lista pokazuje od razu fioletowy podgląd z etykietą **Niezapisane**. Czas punktu zostanie ustalony podczas zapisu. Kolejne ustawienie przed zapisem zastępuje ten podgląd. Nowe i edytowane punkty historii również są wyróżnione na liście i mapie administratora. Oznaczenia znikają po potwierdzonym zapisie, wczytaniu zapisanych danych lub powrocie do wcześniej zapisanych wartości; karty mapy innych użytkowników otrzymują zmiany po **Zapisz wszystkie zmiany**.
