@@ -62,7 +62,10 @@ def validate_persons(hass, persons: object, previous: dict, now: datetime, *, ch
         if (
             not isinstance(entity_id, str) or not entity_id.startswith("person.")
             or (check_entities and hass.states.get(entity_id) is None) or not isinstance(settings, dict)
-            or set(settings) != {"enabled", "current", "history"}
+            or set(settings) not in (
+                {"enabled", "current", "history"},
+                {"enabled", "current", "history", "current_history_timestamp"},
+            )
             or type(settings["enabled"]) is not bool
             or not isinstance(settings["history"], list)
             or len(settings["history"]) > MAX_HISTORY
@@ -79,7 +82,14 @@ def validate_persons(hass, persons: object, previous: dict, now: datetime, *, ch
             seen.add(instant)
             history.append(normalized | {"timestamp": instant.isoformat()})
         old_current = previous.get(entity_id, {}).get("current")
-        if old_current is not None and all(current[k] == old_current[k] for k in current):
+        if "current_history_timestamp" in settings:
+            current_at = timestamp(settings["current_history_timestamp"]).isoformat()
+            selected = next((point for point in history if point["timestamp"] == current_at), None)
+            if selected is None or any(current[k] != selected[k] for k in current):
+                raise LocationError("invalid_input")
+            # Consume the draft marker; only the validated historical point persists.
+            current = deepcopy(selected)
+        elif old_current is not None and all(current[k] == old_current[k] for k in current):
             current = deepcopy(old_current)
         else:
             if now in seen or len(history) >= MAX_HISTORY:
