@@ -7,8 +7,8 @@ import secrets
 
 
 def valid_pin(pin: object) -> bool:
-    """Accept an explicit 6–12 digit ASCII PIN, including leading zeroes."""
-    return isinstance(pin, str) and re.fullmatch(r"[0-9]{6,12}", pin) is not None
+    """Accept 4–12 ASCII letters or digits, preserving case and leading zeroes."""
+    return isinstance(pin, str) and re.fullmatch(r"[A-Za-z0-9]{4,12}", pin) is not None
 
 
 def hash_pin(pin: str) -> dict[str, str]:

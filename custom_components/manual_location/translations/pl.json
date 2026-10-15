@@ -4,11 +4,11 @@
     "step": {
       "user": {
         "title": "Manual Location",
-        "description": "Ustal PIN składający się z 6–12 cyfr, który odblokuje ustawienia mapy administratora. Nie ma domyślnego PIN-u.",
+        "description": "Ustal PIN składający się z 4–12 znaków: litery A–Z, a–z lub cyfry, który odblokuje ustawienia mapy administratora. Nie ma domyślnego PIN-u.",
         "data": {"pin": "PIN"}
       }
     },
-    "error": {"invalid_pin": "Wpisz PIN składający się z 6–12 cyfr."},
+    "error": {"invalid_pin": "Wpisz PIN składający się z 4–12 znaków: litery A–Z, a–z lub cyfry."},
     "abort": {"already_configured": "Integracja Manual Location jest już skonfigurowana."}
   }
 }

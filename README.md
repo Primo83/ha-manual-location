@@ -12,7 +12,7 @@ Sprawdzona wersja Home Assistanta: **2026.9.4**. Zgodność z nowszymi wersjami 
 2. Wpisz `https://github.com/Primo83/ha-manual-location`, wybierz typ **Integration / Integracja** i dodaj repozytorium.
 3. Wyszukaj **Manual Location**, otwórz je i wybierz pobranie z gałęzi **main**.
 4. Po pobraniu samodzielnie uruchom ponownie Home Assistanta.
-5. Wybierz **Ustawienia → Urządzenia i usługi → Dodaj integrację → Manual Location** i ustal PIN składający się z 6–12 cyfr bezpośrednio w HA. Nie umieszczaj PIN-u w zgłoszeniach ani w repozytorium.
+5. Wybierz **Ustawienia → Urządzenia i usługi → Dodaj integrację → Manual Location** i ustal PIN składający się z 4–12 znaków: litery A–Z, a–z lub cyfry bezpośrednio w HA. Nie umieszczaj PIN-u w zgłoszeniach ani w repozytorium.
 6. Dodaj zasób dashboardu: URL `/manual_location_static/map.js`, typ **Moduł JavaScript**. Lista zasobów może wymagać trybu zaawansowanego w profilu użytkownika. Odśwież przeglądarkę z pominięciem pamięci podręcznej.
 7. Otwórz panel **Ustawienia mapy**, odblokuj go PIN-em, wybierz osobę i zapisz jej pozycję.
 8. W każdej wybranej karcie mapy zmień `type: map` na `type: custom:manual-location-map`, zachowując listę encji i pozostałe parametry. Integracja nie zmienia dashboardów automatycznie.

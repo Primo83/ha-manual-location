@@ -106,7 +106,7 @@ export function errorText(error) {
     rate_limited: "Za dużo prób. Odczekaj 5 minut przed kolejną próbą odblokowania.",
     invalid_token: "Sesja wygasła. Odblokuj panel ponownie.",
     pin_required: "Sesja wygasła lub połączenie zmieniło się. Odblokuj panel ponownie.",
-    invalid_input: "Niepoprawne dane. Sprawdź współrzędne, daty i limity: 20 osób, 5000 punktów, PIN 6–12 cyfr.",
+    invalid_input: "Niepoprawne dane. Sprawdź współrzędne, daty i limity: 20 osób, 5000 punktów, PIN 4–12 znaków: litery A–Z, a–z lub cyfry.",
     not_loaded: "Integracja nie jest dostępna. Sprawdź jej konfigurację w Home Assistant.",
     storage_error: "Nie udało się zapisać danych na dysku Home Assistant. Zmiany są nadal w formularzu; sprawdź wolne miejsce i ponów zapis.",
     unauthorized: "Brak uprawnień administratora lub uprawnień do wybranej osoby.",

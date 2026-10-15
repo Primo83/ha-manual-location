@@ -4,11 +4,11 @@
     "step": {
       "user": {
         "title": "Manual Location",
-        "description": "Set a PIN of 6–12 digits to unlock the administrator map settings. There is no default PIN.",
+        "description": "Set a PIN of 4–12 characters: letters A–Z, a–z or digits to unlock the administrator map settings. There is no default PIN.",
         "data": {"pin": "PIN"}
       }
     },
-    "error": {"invalid_pin": "Enter a PIN containing 6–12 digits."},
+    "error": {"invalid_pin": "Enter a PIN containing 4–12 characters: letters A–Z, a–z or digits."},
     "abort": {"already_configured": "Manual Location is already configured."}
   }
 }
