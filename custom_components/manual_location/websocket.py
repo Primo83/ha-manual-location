@@ -1,4 +1,4 @@
-"""WebSocket API; only view is available without an administrator PIN session."""
+"""WebSocket API; view and public version need no administrator PIN session."""
 
 import logging
 
@@ -13,6 +13,7 @@ from .coordinator import LocationError
 _LOGGER = logging.getLogger(__name__)
 
 FIELDS = {
+    "version": set(),
     "view": {"entity_ids", "start", "end"},
     "unlock": {"pin"},
     "admin_get": {"token"},
@@ -33,13 +34,15 @@ def async_register_commands(hass):
 async def async_handle_command(hass, connection, msg):
     operation = msg["type"].split("/", 1)[1]
     try:
-        if connection.user is None or (operation != "view" and not connection.user.is_admin):
+        if connection.user is None or (operation not in {"view", "version"} and not connection.user.is_admin):
             raise LocationError("unauthorized")
         if (coordinator := hass.data.get(DOMAIN)) is None:
             raise LocationError("not_loaded")
         if set(msg) - {"id", "type"} != FIELDS[operation]:
             raise LocationError("invalid_input")
-        if operation == "view":
+        if operation == "version":
+            result = {"version": coordinator.version}
+        elif operation == "view":
             result = coordinator.view(connection, msg["entity_ids"], msg["start"], msg["end"])
         elif operation == "unlock":
             result = await coordinator.async_unlock(connection, msg["pin"])

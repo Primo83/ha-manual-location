@@ -59,3 +59,11 @@ Problemy zgłaszaj w [Issues](https://github.com/Primo83/ha-manual-location/issu
 ## Biblioteki zewnętrzne
 
 Leaflet 1.9.4 jest udostępniony na licencji BSD-2-Clause; dołączono [oryginalną licencję](custom_components/manual_location/frontend/vendor/LICENSE-Leaflet) i [informację o źródle](custom_components/manual_location/frontend/vendor/SOURCE.txt). Ta licencja dotyczy biblioteki Leaflet.
+
+## Mapa na telefonie i aktualizacje interfejsu
+
+W widoku panelowym mapa zajmuje pełną dostępną wysokość, także po obrocie telefonu. Ręczne przybliżenie lub przesunięcie zatrzymuje automatyczne dopasowywanie; „Dopasuj mapę” przywraca widok wszystkich punktów. Aktualizacja danych nadal działa w tle. Zmiana konta lub listy encji resetuje zapamiętany widok.
+
+Po zainstalowaniu nowszej wersji integracji i restarcie HA otwarty interfejs wykrywa wydanie co około 30 sekund oraz po powrocie do widocznej aplikacji. Wczytuje wtedy świeże pliki automatycznie. Przeładowanie jest wstrzymane podczas edycji panelu; może jednokrotnie przywrócić początkowy widok mapy po zmianie wydania. Nie jest to automatyczna instalacja aktualizacji HACS.
+
+Klient z wersją starszą niż 0.1.4 nie ma jeszcze tego mechanizmu: przy pierwszym przejściu może być konieczne zwykłe odświeżenie lub ponowne otwarcie widoku. Zamknięta lub uśpiona aplikacja sprawdza wersję po wznowieniu, gdy odzyska połączenie.

@@ -1,5 +1,6 @@
-import { callWS, errorText, geoModels, historyPoints, originalIds, personModels, validateView, zoneModels } from "./data.js";
-import { L, makeMap, mapStyles, personIcon, popup, setMapHass } from "./map-common.js";
+import { callWS, errorText, geoModels, historyPoints, originalIds, personModels, validateView, zoneModels } from "./data.js?v=0.1.4";
+import { L, makeMap, mapStyles, personIcon, popup, setMapHass } from "./map-common.js?v=0.1.4";
+import { startUpdateCheck } from "./updates.js?v=0.1.4";
 
 const COLORS = ["#186d83", "#b05631", "#644f9a", "#42754b", "#a2376b"];
 
@@ -9,23 +10,47 @@ export class ManualLocationMap extends HTMLElement {
     this.attachShadow({ mode: "open" });
     this._epoch = 0;
     this._originals = {};
+    this._manualView = false;
+    this._onMapInput = (event) => {
+      if (event.type === "keydown" && !["ArrowUp", "ArrowDown", "ArrowLeft", "ArrowRight", "+", "-", "=", "_"].includes(event.key)) return;
+      if (this._view) this._manualView = true;
+    };
     this._onDisconnect = () => this._invalidate("Utracono połączenie. Lokalizacje są ukryte.");
     this._onReady = () => { this._invalidate("Łączenie…"); this._refresh(); };
+  }
+
+  set layout(value) {
+    this._layout = value;
+    this.toggleAttribute("panel", value === "panel");
+    this._applyLayout();
+  }
+
+  get layout() { return this._layout; }
+
+  _applyLayout() {
+    const frame = this.shadowRoot.querySelector(".frame");
+    if (!frame) return;
+    const parts = String(this._config?.aspect_ratio || "16:9").split(":").map(Number);
+    frame.style.aspectRatio = this.layout === "panel" ? "auto"
+      : parts.length === 2 && parts.every((n) => Number.isFinite(n) && n > 0) ? `${parts[0]} / ${parts[1]}` : "16 / 9";
   }
 
   setConfig(config) {
     if (!Array.isArray(config.entities) || !config.entities.length) throw new Error("Podaj listę entities dla karty mapy.");
     const hours = config.hours_to_show === undefined ? 24 : Number(config.hours_to_show);
     if (!Number.isFinite(hours) || hours < 0 || hours > 744) throw new Error("hours_to_show musi mieścić się w 0…744.");
+    const previousIds = JSON.stringify(this._configuredIds);
     this._config = { ...config, hours_to_show: hours };
     this._configuredIds = [...new Set(config.entities.map((e) => typeof e === "string" ? e : e.entity))];
     this._entityIds = this._configuredIds.filter((id) => !id.startsWith("zone."));
     this._personIds = this._entityIds.filter((id) => id.startsWith("person."));
-    this._invalidate("Łączenie…");
+    this._invalidate("Łączenie…", previousIds === JSON.stringify(this._configuredIds));
+    this._applyLayout();
     if (this.isConnected) { this._ensureMap(); this._refresh(); }
   }
 
   set hass(hass) {
+    const sameUser = Boolean(hass.user?.id) && this._hass?.user?.id === hass.user.id;
     const changed = this._hass?.connection !== hass.connection || this._hass?.user?.id !== hass.user?.id;
     const disconnected = hass.connected === false && this._hass?.connected !== false;
     this._hass = hass;
@@ -34,7 +59,7 @@ export class ManualLocationMap extends HTMLElement {
       this._unbind();
       this._connection = hass.connection;
       if (this.isConnected) this._bind();
-      this._invalidate("Łączenie…");
+      this._invalidate("Łączenie…", sameUser);
     }
     if (disconnected) this._onDisconnect();
     if (this.isConnected && (changed || !this._view) && hass.connected !== false) this._refresh();
@@ -45,13 +70,19 @@ export class ManualLocationMap extends HTMLElement {
     this._ensureMap();
     this._refresh();
     this._timer = setInterval(() => this._refresh(), 5000);
+    this._stopUpdates?.();
+    this._stopUpdates = startUpdateCheck(() => this._hass, () => this.isConnected && this.getClientRects().length > 0);
   }
 
   disconnectedCallback() {
     clearInterval(this._timer);
+    this._stopUpdates?.();
     this._unbind();
     this._resize?.disconnect();
     this._invalidate("Łączenie…");
+    const container = this._map?.getContainer();
+    for (const event of ["pointerdown", "touchstart", "wheel", "keydown"]) container?.removeEventListener(event, this._onMapInput, true);
+    this._map?.off("dragstart", this._onMapInput);
     this._map?.remove();
     this._map = null;
     this.shadowRoot.replaceChildren();
@@ -71,7 +102,13 @@ export class ManualLocationMap extends HTMLElement {
     this._bound = false;
   }
 
-  _invalidate(message) {
+  _invalidate(message, preserveCamera = true) {
+    if (!preserveCamera) {
+      this._manualView = false;
+      this._restoreView = null;
+    } else if (this._map && this._view && this._manualView) {
+      this._restoreView = { center: this._map.getCenter(), zoom: this._map.getZoom() };
+    }
     this._epoch++;
     this._busy = false;
     this._view = null;
@@ -90,21 +127,45 @@ export class ManualLocationMap extends HTMLElement {
 
   _ensureMap() {
     if (this._map || !this._config || !this.isConnected) return;
-    this.shadowRoot.innerHTML = `<style>:host{display:block}ha-card{display:block;overflow:hidden;background:var(--ha-card-background,var(--card-background-color,#fff));border-radius:var(--ha-card-border-radius,12px);border:1px solid var(--divider-color,#ddd)}h2{font-size:20px;font-weight:400;margin:0;padding:20px 20px 14px;color:var(--primary-text-color,#25343b)}.frame{position:relative}.map{height:100%;min-height:230px}.status{position:absolute;z-index:1000;left:12px;right:12px;top:12px;border-radius:6px;padding:12px;background:var(--card-background-color,#fff);color:var(--primary-text-color,#25343b);box-shadow:0 2px 8px #0002;text-align:center}.status[hidden]{display:none}</style><ha-card><h2 hidden></h2><div class="frame"><div class="map"></div><div class="status" role="status"></div></div></ha-card>`;
+    this.shadowRoot.innerHTML = `<style>:host{display:block}ha-card{display:block;overflow:hidden;box-sizing:border-box;background:var(--ha-card-background,var(--card-background-color,#fff));border-radius:var(--ha-card-border-radius,12px);border:var(--ha-card-border-width,1px) solid var(--divider-color,#ddd)}h2{flex:none;font-size:20px;font-weight:400;margin:0;padding:20px 20px 14px;color:var(--primary-text-color,#25343b)}.frame{position:relative;min-height:230px}.map{position:absolute;inset:0;height:100%}:host([panel]){height:100%;min-height:0}:host([panel]) ha-card{display:flex;flex-direction:column;height:100%;min-height:0}:host([panel]) .frame{flex:1;min-height:0}.fit-map{width:44px;height:44px;background:white;color:#333;border:0;border-radius:2px;cursor:pointer;display:grid;place-items:center}.fit-map svg{width:24px;height:24px}.fit-map:focus-visible{outline:3px solid #186d83}.status{position:absolute;z-index:1000;left:12px;right:12px;top:12px;border-radius:6px;padding:12px;background:var(--card-background-color,#fff);color:var(--primary-text-color,#25343b);box-shadow:0 2px 8px #0002;text-align:center}.status[hidden]{display:none}</style><ha-card><h2 hidden></h2><div class="frame"><div class="map"></div><div class="status" role="status"></div></div></ha-card>`;
     mapStyles(this.shadowRoot);
     const title = this.shadowRoot.querySelector("h2");
     title.textContent = this._config.title || "";
     title.hidden = !this._config.title;
     const frame = this.shadowRoot.querySelector(".frame");
-    const ratio = String(this._config.aspect_ratio || "16:9");
-    const parts = ratio.split(":").map(Number);
-    frame.style.aspectRatio = parts.length === 2 && parts.every((n) => n > 0) ? `${parts[0]} / ${parts[1]}` : "16 / 9";
+    this._applyLayout();
     this._statusEl = this.shadowRoot.querySelector(".status");
     this._map = makeMap(this.shadowRoot.querySelector(".map"), this._hass);
     this._layers = L.layerGroup().addTo(this._map);
-    this._resize = new ResizeObserver(() => this._map?.invalidateSize());
+    const container = this._map.getContainer();
+    for (const event of ["pointerdown", "touchstart", "wheel", "keydown"]) container.addEventListener(event, this._onMapInput, { capture: true, passive: true });
+    this._map.on("dragstart", this._onMapInput);
+    const fit = L.control({ position: "topleft" });
+    fit.onAdd = () => {
+      const button = document.createElement("button");
+      button.type = "button";
+      button.className = "fit-map leaflet-bar";
+      button.title = "Dopasuj mapę";
+      button.setAttribute("aria-label", "Dopasuj mapę");
+      button.innerHTML = '<svg viewBox="0 0 24 24" aria-hidden="true"><path fill="currentColor" d="M3 3h6v2H5v4H3V3m12 0h6v6h-2V5h-4V3M3 15h2v4h4v2H3v-6m16 0h2v6h-6v-2h4v-4M12 8a4 4 0 1 1 0 8 4 4 0 0 1 0-8Z"/></svg>';
+      L.DomEvent.disableClickPropagation(button);
+      L.DomEvent.disableScrollPropagation(button);
+      button.addEventListener("click", () => this._fitView());
+      return button;
+    };
+    fit.addTo(this._map);
+    this._resize = new ResizeObserver(() => this._map?.invalidateSize({ pan: true, animate: false }));
     this._resize.observe(frame);
     this._status(this._message || "Łączenie…");
+  }
+
+  _fitView() {
+    if (!this._view) return;
+    this._manualView = false;
+    this._restoreView = null;
+    this._fitted = false;
+    const now = Date.now();
+    this._render(now - this._config.hours_to_show * 3600000, now);
   }
 
   async _refresh() {
@@ -180,7 +241,12 @@ export class ManualLocationMap extends HTMLElement {
     }
     const dark = this._config.theme_mode === "dark" || (this._config.theme_mode !== "light" && (this._config.dark_mode ?? this._hass.themes?.darkMode));
     this.shadowRoot.querySelector(".map").classList.toggle("map-dark", Boolean(dark));
-    if (bounds.length && (!this._fitted || this._config.auto_fit)) {
+    if (this._restoreView) {
+      this._map.setView(this._restoreView.center, this._restoreView.zoom, { animate: false });
+      this._restoreView = null;
+      this._fitted = true;
+    }
+    if (bounds.length && !this._manualView && (!this._fitted || this._config.auto_fit)) {
       this._map.fitBounds(bounds, { padding: [35, 35], maxZoom: this._config.default_zoom || 14, animate: false });
       this._fitted = true;
     }
