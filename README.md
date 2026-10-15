@@ -40,7 +40,7 @@ Można zachować również `geo_location_sources`, np. źródło Blitzortung, je
 
 Po instalacji sprawdź zapis pozycji, dodawanie i usuwanie historii, przełącznik włączenia oraz zachowanie ustawień po restarcie HA. Sprawdź także widok na zwykłym koncie. Lokalne testy projektu nie zastępują sprawdzenia w konkretnej instalacji.
 
-Kafelki mapy pochodzą z OpenStreetMap; dostawca otrzymuje żądania sieciowe dotyczące oglądanego obszaru. Biblioteka Leaflet jest dołączona lokalnie, a mapa wymaga dostępu do kafelków.
+Kafelki OpenStreetMap są pobierane przez oficjalny mechanizm Map tiles Home Assistanta, bez dodatkowego klucza API do ustawienia. Dostawca otrzymuje żądania dotyczące oglądanego obszaru. Biblioteka Leaflet jest dołączona lokalnie, a mapa wymaga dostępu do kafelków.
 
 ## Aktualizacje z main
 

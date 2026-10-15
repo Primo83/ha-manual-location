@@ -1,5 +1,5 @@
 import { callWS, errorText, geoModels, historyPoints, originalIds, personModels, validateView, zoneModels } from "./data.js";
-import { L, makeMap, mapStyles, personIcon, popup } from "./map-common.js";
+import { L, makeMap, mapStyles, personIcon, popup, setMapHass } from "./map-common.js";
 
 const COLORS = ["#186d83", "#b05631", "#644f9a", "#42754b", "#a2376b"];
 
@@ -29,6 +29,7 @@ export class ManualLocationMap extends HTMLElement {
     const changed = this._hass?.connection !== hass.connection || this._hass?.user?.id !== hass.user?.id;
     const disconnected = hass.connected === false && this._hass?.connected !== false;
     this._hass = hass;
+    setMapHass(this._map, hass);
     if (changed) {
       this._unbind();
       this._connection = hass.connection;
@@ -99,7 +100,7 @@ export class ManualLocationMap extends HTMLElement {
     const parts = ratio.split(":").map(Number);
     frame.style.aspectRatio = parts.length === 2 && parts.every((n) => n > 0) ? `${parts[0]} / ${parts[1]}` : "16 / 9";
     this._statusEl = this.shadowRoot.querySelector(".status");
-    this._map = makeMap(this.shadowRoot.querySelector(".map"));
+    this._map = makeMap(this.shadowRoot.querySelector(".map"), this._hass);
     this._layers = L.layerGroup().addTo(this._map);
     this._resize = new ResizeObserver(() => this._map?.invalidateSize());
     this._resize.observe(frame);

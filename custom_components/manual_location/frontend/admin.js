@@ -87,7 +87,7 @@ export class ManualLocationAdmin extends HTMLElement {
       return;
     }
     mapStyles(this.shadowRoot);
-    this._map = makeMap(this.shadowRoot.querySelector("#map"));
+    this._map = makeMap(this.shadowRoot.querySelector("#map"), this._hass);
     this._layers = L.layerGroup().addTo(this._map);
     this._map.on("click", ({ latlng }) => {
       if (!this._hass.states[this._selected]) return;
