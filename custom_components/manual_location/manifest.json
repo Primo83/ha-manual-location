@@ -1,0 +1,14 @@
+{
+  "domain": "manual_location",
+  "name": "Manual Location",
+  "version": "0.1.0",
+  "codeowners": ["@Primo83"],
+  "config_flow": true,
+  "dependencies": ["frontend", "websocket_api"],
+  "documentation": "https://github.com/Primo83/ha-manual-location",
+  "issue_tracker": "https://github.com/Primo83/ha-manual-location/issues",
+  "integration_type": "service",
+  "iot_class": "local_polling",
+  "requirements": [],
+  "single_config_entry": true
+}

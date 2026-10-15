@@ -1,0 +1,4 @@
+Leaflet 1.9.4 (BSD-2-Clause)
+Source: https://registry.npmjs.org/leaflet/-/leaflet-1.9.4.tgz
+Archive SHA256: 84c65a256e50657896f54c33bd857b6849ebe94c817803be818bf32a3dde0b77
+Runtime: local ESM and CSS only.
