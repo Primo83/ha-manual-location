@@ -41,6 +41,7 @@ export class ManualLocationAdmin extends HTMLElement {
     this._bound = false;
   }
   _clearSession(message = "") {
+    this._cancelLocation();
     this._epoch++;
     this._token = null;
     this._snapshot = null;
@@ -49,7 +50,7 @@ export class ManualLocationAdmin extends HTMLElement {
     clearTimeout(this._expiry);
     if (this.isConnected) { this._render(); this._message(message); }
   }
-  _destroyMap() { this._resize?.disconnect(); this._map?.remove(); this._map = null; }
+  _destroyMap() { this._cancelLocation(); this._resize?.disconnect(); this._map?.remove(); this._map = null; this._locateButton = null; }
   _message(text, good = false) {
     const box = this.shadowRoot.querySelector("#message");
     if (box) { box.textContent = text; box.classList.toggle("good", good); box.hidden = !text; }
@@ -75,10 +76,11 @@ export class ManualLocationAdmin extends HTMLElement {
     this.shadowRoot.innerHTML = `<style>
       :host{display:block;min-height:100%;color:var(--primary-text-color,#20343b);background:var(--primary-background-color,#f2f5f4);font-family:var(--paper-font-body1_-_font-family,"Segoe UI",sans-serif)}*{box-sizing:border-box}main{max-width:1220px;margin:auto;padding:32px 28px 56px}header{display:flex;justify-content:space-between;gap:20px;align-items:center;margin-bottom:24px}.eyebrow{text-transform:uppercase;letter-spacing:.16em;font-size:11px;font-weight:700;color:var(--secondary-text-color,#657a82);margin-bottom:8px}h1{font-family:Georgia,serif;font-size:32px;font-weight:400;margin:0}h2{font-size:17px;margin:0 0 18px}.sub{color:var(--secondary-text-color,#657a82);line-height:1.6;font-size:14px;margin:10px 0 0}.box{border:1px solid var(--divider-color,#d9e2e0);border-radius:12px;background:var(--card-background-color,#fff);padding:22px}.lockbox{max-width:480px;margin:58px auto}.layout{display:grid;grid-template-columns:320px minmax(0,1fr);gap:18px}.sidebar{display:flex;flex-direction:column;gap:18px}.mapbox{padding:0;overflow:hidden}.map{height:380px}.caption{padding:12px 18px;border-top:1px solid var(--divider-color,#d9e2e0);font-size:13px;color:var(--secondary-text-color,#657a82)}label{display:block;font-size:13px;font-weight:600;margin-bottom:7px}input,select,button{font:inherit}input,select{width:100%;min-height:42px;padding:9px 11px;background:var(--input-fill-color,var(--card-background-color,#fff));color:inherit;border:1px solid var(--divider-color,#c8d6d4);border-radius:7px}input:focus,select:focus{outline:2px solid #338b9c;outline-offset:1px}.field{margin-bottom:16px}.pair{display:grid;grid-template-columns:1fr 1fr;gap:10px}.toggle{display:flex;align-items:center;gap:10px;font-size:14px;font-weight:500;cursor:pointer}.toggle input{width:20px;min-height:20px;accent-color:#176e82}.toggle small{display:block;font-weight:400;color:var(--secondary-text-color,#657a82);margin-top:3px}button{min-height:40px;border-radius:7px;padding:9px 14px;cursor:pointer;background:transparent;color:inherit;border:1px solid var(--divider-color,#c8d6d4);font-size:13px;font-weight:600}button:hover:not(:disabled){background:#63889a16}button:focus-visible{outline:3px solid #338b9c;outline-offset:2px}button.primary{background:#176e82;color:white;border-color:#176e82}button.primary:hover:not(:disabled){background:#105769}button:disabled{opacity:.48;cursor:default}.wide{width:100%}.actions{display:flex;gap:8px;flex-wrap:wrap}.history{margin-top:18px}.history-top{display:flex;align-items:center;justify-content:space-between;gap:16px}.history-top h2{margin:0}.history-editor{display:grid;grid-template-columns:1fr 1fr 1.5fr auto;gap:10px;align-items:end;padding:20px 0}.history-editor .field{margin:0}.scroll{max-height:340px;overflow:auto;border-top:1px solid var(--divider-color,#d9e2e0)}.row{display:flex;align-items:center;justify-content:space-between;padding:13px 0;gap:12px;border-bottom:1px solid var(--divider-color,#e3e9e7)}.row time{display:block;font-size:13px;font-weight:600}.row small{display:block;margin-top:4px;color:var(--secondary-text-color,#657a82)}.row button{min-height:34px;padding:5px 10px}.danger{color:#b74435}.empty{padding:22px 0;color:var(--secondary-text-color,#657a82);font-size:14px;line-height:1.6}.footer{display:flex;align-items:center;justify-content:space-between;gap:18px;margin-top:20px;font-size:13px;color:var(--secondary-text-color,#657a82)}#message{margin:0 0 20px;padding:13px 16px;border-radius:8px;background:#a8402715;border:1px solid #a8402750;font-size:14px;line-height:1.5}#message.good{background:#34815e13;border-color:#34815e50}[hidden]{display:none!important}.current-summary{font-size:13px;line-height:1.6;color:var(--secondary-text-color,#657a82);margin:0 0 18px}.pin-change{margin-top:18px}.pin-change summary{cursor:pointer;font-size:13px}.pin-change form{margin-top:16px;max-width:400px}.notice{border-left:3px solid #176e82;padding-left:12px;font-size:13px;color:var(--secondary-text-color,#657a82);line-height:1.6}
       @media(max-width:900px){.layout{grid-template-columns:1fr}.sidebar{display:grid;grid-template-columns:1fr 1fr}.history-editor{grid-template-columns:1fr 1fr}.map{height:340px}}@media(max-width:580px){main{padding:22px 14px 36px}header{align-items:flex-start}h1{font-size:27px}.sidebar{display:flex}.box{padding:18px}.mapbox{padding:0}.history-editor{grid-template-columns:1fr 1fr}.history-editor .timefield{grid-column:1/-1}.footer{align-items:flex-start;flex-direction:column}.row{align-items:flex-start}.map{height:290px}}
+      .leaflet-tooltip.device-location-tooltip{width:180px;white-space:normal;text-align:center}
       </style><main><header><div><div class="eyebrow">Manual Location</div><h1>Pozycje i historia</h1><p class="sub">Jeden zapis, wspólny dla wszystkich kart mapy.</p></div>${unlocked ? '<button id="lock">Zablokuj panel</button>' : ""}</header><div id="message" role="status" hidden></div>
       ${!admin ? '<section class="box lockbox"><h2>Panel administratora</h2><p class="sub">Zaloguj się na konto administratora Home Assistant, aby zarządzać lokalizacjami.</p></section>' : !unlocked ? '<section class="box lockbox"><h2>Odblokuj ustawienia</h2><p class="sub">Wpisz PIN ustalony podczas konfiguracji integracji. Sesja trwa do 15 minut.</p><form id="unlock-form"><div class="field" style="margin-top:22px"><label for="pin">PIN administratora (4–12 znaków: litery A–Z, a–z lub cyfry)</label><input id="pin" type="password" pattern="[A-Za-z0-9]{4,12}" minlength="4" maxlength="12" autocomplete="off" required></div><button class="primary wide" type="submit">Odblokuj</button></form></section>' : `
       <div class="layout"><aside class="sidebar"><section class="box"><h2>Ustawienia map</h2><label class="toggle"><input type="checkbox" id="global-enabled"><span>Włącz ręczne lokalizacje<small>Wyłączenie przywraca dane HA</small></span></label><div class="field" style="margin-top:24px"><label for="person">Osoba</label><select id="person"></select></div><label class="toggle"><input type="checkbox" id="person-enabled"><span>Włącz dla tej osoby</span></label><p class="notice">Nowa osoba jest włączona po ustawieniu pierwszej pozycji i zapisaniu zmian.</p><p class="notice" id="missing-person-notice" hidden>Tej osoby nie ma już w Home Assistant. Usuń jej ustawienia poniżej, a następnie zapisz wszystkie zmiany. Pozostałe osoby zachowają swoje ustawienia.</p><button class="wide danger" id="remove-person">Usuń ustawienia tej osoby</button></section>
-      <section class="box"><h2>Bieżąca pozycja</h2><p class="current-summary" id="current-summary"></p><div class="pair"><div class="field"><label for="current-lat">Szerokość</label><input id="current-lat" type="number" step="any" min="-90" max="90"></div><div class="field"><label for="current-lon">Długość</label><input id="current-lon" type="number" step="any" min="-180" max="180"></div></div><button class="wide" id="set-current">Ustaw bieżącą pozycję</button><p class="sub">Przy zapisie serwer dopisze tę pozycję do historii z aktualnym czasem.</p></section></aside>
+      <section class="box"><h2>Bieżąca pozycja</h2><p class="current-summary" id="current-summary"></p><div class="field"><button class="wide" id="use-device-location">Użyj lokalizacji tego urządzenia</button><p class="sub">Jednorazowy odczyt z telefonu lub komputera, na którym otwarto panel. Wymaga zgody na lokalizację; dokładność zależy od urządzenia.</p></div><div class="pair"><div class="field"><label for="current-lat">Szerokość</label><input id="current-lat" type="number" step="any" min="-90" max="90"></div><div class="field"><label for="current-lon">Długość</label><input id="current-lon" type="number" step="any" min="-180" max="180"></div></div><button class="wide" id="set-current">Ustaw bieżącą pozycję</button><p class="sub">Przy zapisie serwer dopisze tę pozycję do historii z aktualnym czasem.</p></section></aside>
       <section><div class="box mapbox"><div class="map" id="map" aria-label="Mapa wyboru pozycji"></div><div class="caption">Kliknij mapę, aby uzupełnić współrzędne. Następnie ustaw pozycję lub dodaj punkt historii.</div></div><section class="box history"><div class="history-top"><h2>Historia</h2><span class="eyebrow" id="count"></span></div><p class="sub">Edycja lub usunięcie punktu nie zmienia bieżącej pozycji.</p><form id="history-form" class="history-editor"><div class="field"><label for="history-lat">Szerokość</label><input id="history-lat" type="number" step="any" min="-90" max="90" required></div><div class="field"><label for="history-lon">Długość</label><input id="history-lon" type="number" step="any" min="-180" max="180" required></div><div class="field timefield"><label for="history-time">Lokalna data i godzina</label><input id="history-time" type="datetime-local" step="1" required></div><button id="add-history" type="submit">Dodaj punkt</button></form><button id="cancel-edit" hidden>Anuluj edycję punktu</button><div class="scroll" id="history-list"></div></section></section></div>
       <footer class="footer"><span id="save-state"></span><div class="actions"><button id="reload">Wczytaj zapisane dane</button><button class="primary" id="save">Zapisz wszystkie zmiany</button></div></footer><details class="pin-change"><summary>Zmień PIN administratora</summary><form id="pin-form"><div class="field"><label for="new-pin">Nowy PIN (4–12 znaków: litery A–Z, a–z lub cyfry)</label><input id="new-pin" type="password" pattern="[A-Za-z0-9]{4,12}" minlength="4" maxlength="12" autocomplete="off" required></div><button type="submit">Zmień PIN i zablokuj sesje</button></form></details>`}</main>`;
     if (!admin) return;
@@ -89,8 +91,27 @@ export class ManualLocationAdmin extends HTMLElement {
     mapStyles(this.shadowRoot);
     this._map = makeMap(this.shadowRoot.querySelector("#map"), this._hass);
     this._layers = L.layerGroup().addTo(this._map);
+    const locateControl = L.control({ position: "topleft" });
+    locateControl.onAdd = () => {
+      const box = document.createElement("div");
+      box.className = "leaflet-bar";
+      const button = document.createElement("button");
+      button.type = "button";
+      button.title = "Użyj lokalizacji tego urządzenia";
+      button.setAttribute("aria-label", button.title);
+      button.style.cssText = "width:44px;height:44px;padding:9px;background:var(--card-background-color,#fff);color:var(--primary-text-color,#20343b)";
+      button.innerHTML = '<svg viewBox="0 0 24 24" width="24" height="24" aria-hidden="true"><circle cx="12" cy="12" r="7" fill="none" stroke="currentColor" stroke-width="2"/><circle cx="12" cy="12" r="3" fill="currentColor"/><path d="M12 1v4m0 14v4M1 12h4m14 0h4" stroke="currentColor" stroke-width="2"/></svg>';
+      button.addEventListener("click", () => this._locate());
+      box.append(button);
+      L.DomEvent.disableClickPropagation(box);
+      L.DomEvent.disableScrollPropagation(box);
+      this._locateButton = button;
+      return box;
+    };
+    locateControl.addTo(this._map);
     this._map.on("click", ({ latlng }) => {
       if (!this._hass.states[this._selected]) return;
+      this._cancelLocation();
       for (const prefix of ["current", "history"]) {
         this.shadowRoot.querySelector(`#${prefix}-lat`).value = latlng.lat.toFixed(6);
         this.shadowRoot.querySelector(`#${prefix}-lon`).value = latlng.lng.toFixed(6);
@@ -119,6 +140,8 @@ export class ManualLocationAdmin extends HTMLElement {
       if (person) { person.enabled = e.target.checked; this._changed(); }
     });
     this.shadowRoot.querySelector("#set-current").addEventListener("click", () => this._setCurrent());
+    this.shadowRoot.querySelector("#use-device-location").addEventListener("click", () => this._locate());
+    for (const field of this.shadowRoot.querySelectorAll("#current-lat, #current-lon")) field.addEventListener("input", () => this._cancelLocation());
     this.shadowRoot.querySelector("#remove-person").addEventListener("click", () => this._removePerson());
     this.shadowRoot.querySelector("#history-form").addEventListener("submit", (e) => { e.preventDefault(); this._addHistory(); });
     this.shadowRoot.querySelector("#cancel-edit").addEventListener("click", () => { this._editIndex = -1; this._refreshHistory(); });
@@ -132,6 +155,7 @@ export class ManualLocationAdmin extends HTMLElement {
 
   _person() { return this._snapshot?.persons[this._selected]; }
   _refreshPerson() {
+    this._cancelLocation();
     const person = this._person();
     const missing = !this._hass.states[this._selected];
     this.shadowRoot.querySelector("#missing-person-notice").hidden = !missing || !person;
@@ -148,6 +172,64 @@ export class ManualLocationAdmin extends HTMLElement {
     this.shadowRoot.querySelector("#history-time").value = localDateInput();
     this._refreshHistory();
     this._drawPerson(true);
+  }
+  _cancelLocation() {
+    if (this._locationRequest) this._message("Pobieranie lokalizacji anulowane.");
+    clearTimeout(this._locationRequest?.timer);
+    this._locationRequest = null;
+    this._deviceLocation?.remove();
+    this._deviceLocation = null;
+    for (const button of [this.shadowRoot.querySelector("#use-device-location"), this._locateButton]) {
+      if (!button) continue;
+      button.disabled = !this._hass?.states[this._selected];
+      button.removeAttribute("aria-busy");
+    }
+  }
+  _locate() {
+    if (this._busy || this._locationRequest || !this._token || !this._hass?.user?.is_admin || !this._hass.states[this._selected]) return;
+    this._cancelLocation();
+    if (!window.isSecureContext) { this._message("Lokalizacja urządzenia wymaga otwarcia Home Assistanta przez HTTPS."); return; }
+    if (!navigator.geolocation) { this._message("Ta przeglądarka nie udostępnia lokalizacji. Wybierz punkt na mapie lub wpisz współrzędne."); return; }
+    const request = { epoch: this._epoch, person: this._selected };
+    this._locationRequest = request;
+    for (const button of [this.shadowRoot.querySelector("#use-device-location"), this._locateButton]) {
+      button.disabled = true;
+      button.setAttribute("aria-busy", "true");
+    }
+    this._message("Pobieranie lokalizacji urządzenia… Jeśli pojawi się pytanie przeglądarki, zezwól na dostęp.");
+    const finish = (position, error) => {
+      if (this._locationRequest !== request) return;
+      this._cancelLocation();
+      if (!this.isConnected || request.epoch !== this._epoch || request.person !== this._selected
+        || !this._token || !this._hass.user?.is_admin || this._hass.connected === false || !this._hass.states[request.person]) return;
+      if (error) {
+        const messages = {
+          1: "Brak zgody na lokalizację. Zezwól na dostęp dla tej strony i sprawdź uprawnienia lokalizacji przeglądarki lub aplikacji w systemie.",
+          2: "Urządzenie nie mogło ustalić położenia. Sprawdź, czy lokalizacja jest włączona, lub wybierz punkt na mapie.",
+          3: "Nie udało się pobrać lokalizacji w wyznaczonym czasie. Spróbuj ponownie lub wybierz punkt na mapie.",
+        };
+        this._message(messages[error.code] || "Nie udało się pobrać lokalizacji. Wybierz punkt na mapie lub spróbuj ponownie.");
+        return;
+      }
+      const { latitude, longitude, accuracy } = position?.coords || {};
+      if (!Number.isFinite(latitude) || Math.abs(latitude) > 90 || !Number.isFinite(longitude) || Math.abs(longitude) > 180
+        || !Number.isFinite(accuracy) || accuracy < 0) { this._message("Urządzenie zwróciło nieprawidłową lokalizację. Spróbuj ponownie lub wybierz punkt na mapie."); return; }
+      this.shadowRoot.querySelector("#current-lat").value = latitude.toFixed(6);
+      this.shadowRoot.querySelector("#current-lon").value = longitude.toFixed(6);
+      const label = `Lokalizacja tego urządzenia · dokładność około ${Math.ceil(accuracy)} m`;
+      this._deviceLocation = L.layerGroup().addTo(this._map);
+      const area = L.circle([latitude, longitude], { radius: accuracy, color: "#1976d2", weight: 1, fillOpacity: 0.12 }).addTo(this._deviceLocation);
+      L.circleMarker([latitude, longitude], { radius: 7, color: "white", weight: 2, fillColor: "#1976d2", fillOpacity: 1 })
+        .bindTooltip(label, { permanent: true, direction: "top", className: "device-location-tooltip" }).addTo(this._deviceLocation);
+      this._map.fitBounds(area.getBounds(), { maxZoom: 16, padding: [30, 30] });
+      this._message(`${label}. Sprawdź punkt, kliknij „Ustaw bieżącą pozycję”, a następnie „Zapisz wszystkie zmiany”.`, true);
+    };
+    // The browser timeout excludes waiting for permission; keep the UI bounded too.
+    request.timer = setTimeout(() => finish(null, { code: 3 }), 30000);
+    try {
+      navigator.geolocation.getCurrentPosition((position) => finish(position), (error) => finish(null, error),
+        { enableHighAccuracy: true, maximumAge: 0, timeout: 15000 });
+    } catch { finish(null, {}); }
   }
   _refreshHistory() {
     const history = this._person()?.history || [];
@@ -212,6 +294,7 @@ export class ManualLocationAdmin extends HTMLElement {
   }
   _setCurrent() {
     if (this._busy) return;
+    this._cancelLocation();
     try {
       if (!this._hass.states[this._selected]) throw new Error("Najpierw dodaj osobę w Home Assistant.");
       const point = readPoint(this.shadowRoot.querySelector("#current-lat").value, this.shadowRoot.querySelector("#current-lon").value);
@@ -267,6 +350,7 @@ export class ManualLocationAdmin extends HTMLElement {
   }
   async _admin(type, extra = {}) {
     if (this._busy || !this._token) return null;
+    this._cancelLocation();
     const epoch = this._epoch;
     this._busy = true;
     this._saveState();

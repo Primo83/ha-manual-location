@@ -32,6 +32,8 @@ Można zachować również `geo_location_sources`, np. źródło Blitzortung, je
 
 ## Działanie i sprawdzenie
 
+- W panelu administratora przycisk **Użyj lokalizacji tego urządzenia** lub ikona celownika na mapie pobierają jednorazowo położenie telefonu albo komputera z otwartym panelem. Po zgodzie przeglądarki mapa pokazuje punkt i krąg dokładności, a pola bieżącej pozycji zostają uzupełnione. Następnie kliknij **Ustaw bieżącą pozycję** i **Zapisz wszystkie zmiany**. Sam odczyt nie zapisuje danych i nie uruchamia ciągłego śledzenia.
+- Lokalizacja urządzenia wymaga HTTPS oraz uprawnień przeglądarki/aplikacji i systemu. Na Windows wynik może być przybliżony — sprawdź podaną dokładność. Funkcja dotyczy urządzenia z otwartym panelem, nie zdalnego pobrania pozycji innego telefonu. [Geolocation API](https://developer.mozilla.org/en-US/docs/Web/API/Geolocation/getCurrentPosition).
 - Dane ręczne są wspólne dla wszystkich kart i odświeżają się co około 5 sekund.
 - Po skonfigurowaniu osoby funkcja jest włączona. Wyłączenie jej w panelu przywraca prezentację oryginalnych danych HA dla tej osoby.
 - Bieżąca pozycja i historia są osobne. Zmiana bieżącej pozycji dopisuje punkt historyczny; edycja lub usunięcie historii nie przesuwają bieżącego markera.

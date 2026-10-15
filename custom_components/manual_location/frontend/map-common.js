@@ -7,7 +7,7 @@ export function mapStyles(root) {
   link.href = new URL("./vendor/leaflet.css", import.meta.url).href;
   root.append(link);
   const style = document.createElement("style");
-  style.textContent = `.leaflet-container{font-family:inherit;background:#dce5e5}.person-icon{border:3px solid white;border-radius:50%;background:#186d83;color:#fff;box-shadow:0 2px 7px #1237;display:grid;place-items:center;font-weight:700;overflow:hidden}.person-icon img{width:100%;height:100%;object-fit:cover}.leaflet-popup-content{line-height:1.5}.map-dark .leaflet-tile-pane{filter:brightness(.66) saturate(.7)}.leaflet-control-attribution{color:#222!important;background:#fffe!important}`;
+  style.textContent = `.leaflet-container{font-family:inherit;background:#dce5e5}.person-icon{box-sizing:border-box;border:3px solid white;border-radius:50%;background:#186d83;color:#fff;box-shadow:0 2px 7px #1237;display:block;font-weight:700;overflow:hidden}.person-icon img{display:block;width:100%;height:100%;min-width:0;object-fit:cover}.leaflet-popup-content{line-height:1.5}.map-dark .leaflet-tile-pane{filter:brightness(.66) saturate(.7)}.leaflet-control-attribution{color:#222!important;background:#fffe!important}`;
   root.append(style);
 }
 
@@ -137,6 +137,6 @@ export function personIcon(name, picture, color) {
       }
     } catch { /* Invalid pictures leave readable initials. */ }
   }
-  element.style.cssText = `width:100%;height:100%;display:grid;place-items:center;background:${color}`;
+  element.style.cssText = `width:100%;height:100%;display:flex;align-items:center;justify-content:center;background:${color}`;
   return L.divIcon({ className: "person-icon", html: element, iconSize: [34, 34], iconAnchor: [17, 17] });
 }
