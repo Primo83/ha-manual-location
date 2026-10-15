@@ -70,3 +70,10 @@ Klient z wersją starszą niż 0.1.4 nie ma jeszcze tego mechanizmu: przy pierws
 ## Podgląd niezapisanych punktów
 
 Po ustawieniu innych współrzędnych i kliknięciu **Ustaw bieżącą pozycję** lista pokazuje od razu fioletowy podgląd z etykietą **Niezapisane**. Czas punktu zostanie ustalony podczas zapisu. Kolejne ustawienie przed zapisem zastępuje ten podgląd. Nowe i edytowane punkty historii również są wyróżnione na liście i mapie administratora. Oznaczenia znikają po potwierdzonym zapisie, wczytaniu zapisanych danych lub powrocie do wcześniej zapisanych wartości; karty mapy innych użytkowników otrzymują zmiany po **Zapisz wszystkie zmiany**.
+## Historia jak w natywnej mapie
+
+Długość widocznej trasy określa `hours_to_show` w każdej karcie. Wartość `24` oznacza przesuwające się ostatnie 24 godziny, a `0` wyłącza trasę. Starsze punkty i odcinki są bledsze, nowsze wyraźniejsze: stopniowanie zależy od ich kolejności, tak jak w natywnym rendererze Home Assistant. Początkowy stan sprzed okna jest pokazywany na jego granicy, jeśli w tym momencie nie ma już punktu. Po wskazaniu punktu można odczytać czas.
+
+Okno mapy nie usuwa zapisanej historii z panelu administratora. Bieżący marker nadal pokazuje osobno zapisaną pozycję, również gdy historia jest pusta lub zawiera tylko starsze wpisy. Zachowane są zdjęcia oraz ręcznie wybrany zoom.
+
+Wzorzec zgodności: [renderer HA frontend 20260826.7](https://github.com/home-assistant/frontend/blob/20260826.7/src/components/map/ha-map.ts) oraz [karta mapy](https://github.com/home-assistant/frontend/blob/20260826.7/src/panels/lovelace/cards/hui-map-card.ts). Uwzględniono prawidłową, skończoną przezroczystość także dla pojedynczego punktu i trasy z dwoma punktami.

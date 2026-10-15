@@ -1,6 +1,6 @@
-import { adminPersonOptions, callWS, editHistory, errorText, localDateInput, readPoint, removeHistory } from "./data.js?v=0.1.5";
-import { L, makeMap, mapStyles, popup } from "./map-common.js?v=0.1.5";
-import { registerReloadBlocker, startUpdateCheck } from "./updates.js?v=0.1.5";
+import { adminPersonOptions, callWS, editHistory, errorText, localDateInput, readPoint, removeHistory } from "./data.js?v=0.1.6";
+import { L, makeMap, mapStyles, popup } from "./map-common.js?v=0.1.6";
+import { registerReloadBlocker, startUpdateCheck } from "./updates.js?v=0.1.6";
 
 const DRAFT_COLOR = "#7c3aed";
 const sameCoordinates = (a, b) => !!a && !!b && a.latitude === b.latitude && a.longitude === b.longitude;

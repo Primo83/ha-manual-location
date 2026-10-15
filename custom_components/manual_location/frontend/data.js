@@ -10,7 +10,24 @@ export function windowHistory(points, start, end) {
     .map((p) => coordinates(p)).sort((a, b) => Date.parse(a.timestamp) - Date.parse(b.timestamp));
   const inside = sorted.filter((p) => Date.parse(p.timestamp) >= start && Date.parse(p.timestamp) <= end);
   const before = sorted.filter((p) => Date.parse(p.timestamp) < start).at(-1);
-  return before ? [before, ...inside] : inside;
+  // Match HA's state at the start of the window without changing stored timestamps.
+  return before && Date.parse(inside[0]?.timestamp) !== start
+    ? [{ ...before, timestamp: new Date(start).toISOString() }, ...inside] : inside;
+}
+
+export function historyOpacity(index, count) {
+  // HA fades by point order. A single segment stays visible; the final dot is clamped.
+  return count <= 2 ? 1 : Math.min(1, Math.max(0, .2 + index * .8 / (count - 2)));
+}
+
+export function historySegments(from, to) {
+  if (Math.abs(from[1] - to[1]) <= 180) return [[from, to]];
+  // Split only the rendered line at the antimeridian, as the native HA map does.
+  const difference = ((to[1] - from[1] + 540) % 360) - 180;
+  const edge = from[1] > 0 ? 180 : -180;
+  const latitude = difference === 0 ? (from[0] + to[0]) / 2
+    : from[0] + (to[0] - from[0]) * (edge - from[1]) / difference;
+  return [[from, [latitude, edge]], [[latitude, -edge], to]];
 }
 
 export function validateView(response, entityIds) {

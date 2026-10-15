@@ -1,6 +1,6 @@
-import { callWS, errorText, geoModels, historyPoints, originalIds, personModels, validateView, zoneModels } from "./data.js?v=0.1.5";
-import { L, makeMap, mapStyles, personIcon, popup, setMapHass } from "./map-common.js?v=0.1.5";
-import { startUpdateCheck } from "./updates.js?v=0.1.5";
+import { callWS, errorText, geoModels, historyOpacity, historyPoints, historySegments, originalIds, personModels, validateView, zoneModels } from "./data.js?v=0.1.6";
+import { L, makeMap, mapStyles, personIcon, popup, setMapHass } from "./map-common.js?v=0.1.6";
+import { startUpdateCheck } from "./updates.js?v=0.1.6";
 
 const COLORS = ["#186d83", "#b05631", "#644f9a", "#42754b", "#a2376b"];
 
@@ -227,9 +227,22 @@ export class ManualLocationMap extends HTMLElement {
       const marker = L.marker(current, { icon: personIcon(person.name, person.picture, color), title: person.name, bubblingMouseEvents: false });
       marker.bindPopup(popup(person.name, person.current)).addTo(this._layers);
       bounds.push(current);
-      if (this._config.hours_to_show > 0 && person.history.length > 1) {
+      if (this._config.hours_to_show > 0 && person.history.length) {
         const path = person.history.map((p) => [p.latitude, p.longitude]);
-        L.polyline(path, { color, weight: 3, opacity: .75 }).addTo(this._layers);
+        const radius = "ontouchstart" in window || (globalThis.navigator?.maxTouchPoints || 0) > 0 ? 8 : 3;
+        person.history.forEach((point, pointIndex) => {
+          const opacity = historyOpacity(pointIndex, path.length);
+          const label = document.createElement("div");
+          label.textContent = `${person.name}\n${new Date(point.timestamp).toLocaleString()}`;
+          label.style.whiteSpace = "pre-line";
+          L.circleMarker(path[pointIndex], { radius, color, weight: 3, opacity, fillOpacity: opacity, interactive: true })
+            .bindTooltip(label, { direction: "top" }).addTo(this._layers);
+          if (pointIndex < path.length - 1) {
+            for (const segment of historySegments(path[pointIndex], path[pointIndex + 1])) {
+              L.polyline(segment, { color, weight: 3, opacity, interactive: false }).addTo(this._layers);
+            }
+          }
+        });
         bounds.push(...path);
       }
     });
