@@ -130,6 +130,16 @@ export function errorText(error) {
     forbidden: "Brak uprawnień do wykonania tej operacji.",
     invalid_view: "Niepoprawna odpowiedź integracji. Lokalizacje są ukryte.",
     timeout: "Serwer nie odpowiedział. Sprawdź połączenie i spróbuj ponownie.",
+    scenario_running: "Najpierw zatrzymaj plan. Uruchomionego planu nie można zmieniać ani usuwać.",
+    scenario_missing: "Nie ma zapisanego planu tej osoby. Najpierw zapisz plan.",
+    no_pending_points: "Wszystkie punkty tego planu zostały już wykonane. Dodaj kolejne przed Start.",
+    executed_prefix: "Wykonane punkty planu muszą pozostać bez zmian. Odśwież plan i zmień tylko oczekujące punkty.",
+    global_disabled: "Najpierw włącz ręczne lokalizacje i zapisz ustawienia powyżej.",
+    person_missing: "Tej osoby nie ma w Home Assistant. Plan nie może zostać uruchomiony.",
+    person_disabled: "Najpierw włącz lokalizacje tej osoby i zapisz ustawienia powyżej.",
+    person_limit: "Osiągnięto limit 20 osób z ręczną lokalizacją. Usuń niepotrzebną konfigurację przed uruchomieniem planu nowej osoby.",
+    history_limit: "Historia osiągnęła limit 5000 punktów. Zwolnij miejsce przed uruchomieniem planu.",
+    history_conflict: "Godzina punktu planu koliduje z zapisaną historią. Zmień godzinę oczekującego punktu.",
   };
   return messages[code] || "Operacja nie powiodła się. Sprawdź dane i połączenie, a następnie spróbuj ponownie.";
 }

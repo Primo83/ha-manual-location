@@ -25,7 +25,7 @@ class FrontendView(HomeAssistantView):
     name = f"{DOMAIN}:frontend"
     requires_auth = False
     files = frozenset({
-        "admin.js", "data.js", "map-common.js", "map.js", "updates.js",
+        "admin.js", "data.js", "map-common.js", "map.js", "updates.js", "scenarios.js",
         "vendor/leaflet.js", "vendor/leaflet.css",
         "vendor/images/layers-2x.png", "vendor/images/layers.png",
         "vendor/images/marker-icon-2x.png", "vendor/images/marker-icon.png",
@@ -66,13 +66,13 @@ async def async_setup_entry(hass, entry):
         config_panel_domain=DOMAIN,
     )
     hass.data[DOMAIN] = coordinator
+    await coordinator.async_start()
     return True
 
 
 async def async_unload_entry(hass, entry):
     if (coordinator := hass.data.pop(DOMAIN, None)) is not None:
-        coordinator.loaded = False
-        coordinator.sessions.clear()
+        await coordinator.async_shutdown()
         frontend.async_remove_panel(hass, PANEL_PATH)
     return True
 

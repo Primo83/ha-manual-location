@@ -1,6 +1,7 @@
-import { adminPersonOptions, callWS, editHistory, errorText, localDateInput, readPoint, removeHistory } from "./data.js?v=0.1.9";
-import { L, makeMap, mapStyles, popup } from "./map-common.js?v=0.1.9";
-import { registerReloadBlocker, startUpdateCheck } from "./updates.js?v=0.1.9";
+import { adminPersonOptions, callWS, editHistory, errorText, localDateInput, readPoint, removeHistory } from "./data.js?v=0.1.10";
+import { L, makeMap, mapStyles, popup } from "./map-common.js?v=0.1.10";
+import { registerReloadBlocker, startUpdateCheck } from "./updates.js?v=0.1.10";
+import "./scenarios.js?v=0.1.10";
 
 const DRAFT_COLOR = "#7c3aed";
 const EDIT_COLOR = "#c65d00";
@@ -15,13 +16,21 @@ export class ManualLocationAdmin extends HTMLElement {
     this._selected = "";
     this._editIndex = -1;
     this._currentDrafts = {};
-    this.shadowRoot.addEventListener("input", () => { this._editing = true; });
-    this.shadowRoot.addEventListener("change", () => { this._editing = true; });
-    this._onDisconnect = () => this._clearSession("Połączenie zmieniło się. Odblokuj panel ponownie.");
-    this._onReady = () => this._clearSession("Odblokuj panel po ponownym połączeniu.");
+    this._scenarioDrafts = {};
+    const markEditing = (event) => {
+      if (event.target?.tagName?.toLowerCase() === "manual-location-scenarios") return;
+      if (["person", "pin", "new-pin"].includes(event.target?.id)) return;
+      this._editing = true; this._syncScenarios();
+    };
+    this.shadowRoot.addEventListener("input", markEditing);
+    this.shadowRoot.addEventListener("change", markEditing);
+    this._onDisconnect = () => this._clearSession("Połączenie zmieniło się. Odblokuj panel ponownie; szkice zachowano w tej karcie.", true);
+    this._onReady = () => this._clearSession("Odblokuj panel po ponownym połączeniu.", true);
+    this._beforeUnload = (event) => { if (this._hasDrafts()) { event.preventDefault(); event.returnValue = ""; } };
   }
 
   set hass(hass) {
+    const sameUser = !!hass.user?.id && hass.user.id === this._hass?.user?.id && !!hass.user?.is_admin;
     const changed = this._hass?.connection !== hass.connection || this._hass?.user?.id !== hass.user?.id;
     const disconnected = hass.connected === false && this._hass?.connected !== false;
     this._hass = hass;
@@ -29,17 +38,20 @@ export class ManualLocationAdmin extends HTMLElement {
       this._unbind();
       this._connection = hass.connection;
       if (this.isConnected) this._bind();
-      this._clearSession();
-    } else if (disconnected || !hass.user?.is_admin) this._clearSession();
+      this._clearSession("", sameUser);
+    } else if (disconnected || !hass.user?.is_admin) this._clearSession("", sameUser);
+    else this._syncScenarios();
     if (this.isConnected && !this.shadowRoot.querySelector("main")) this._render();
   }
 
   connectedCallback() {
     this._bind(); this._render();
-    this._removeReloadBlocker = registerReloadBlocker(() => !this._token && !this._busy && !this._dirty && !this._editing);
+    window.addEventListener?.("beforeunload", this._beforeUnload);
+    this._removeReloadBlocker = registerReloadBlocker(() => !this._token && !this._busy && !this._hasDrafts());
     this._stopUpdates = startUpdateCheck(() => this._hass, () => this.isConnected && this.getClientRects().length > 0);
   }
   disconnectedCallback() {
+    window.removeEventListener?.("beforeunload", this._beforeUnload);
     this._stopUpdates?.(); this._stopUpdates = null;
     this._removeReloadBlocker?.(); this._removeReloadBlocker = null;
     this._unbind(); this._clearSession(); this._destroyMap();
@@ -57,7 +69,13 @@ export class ManualLocationAdmin extends HTMLElement {
     this._connection.removeEventListener("ready", this._onReady);
     this._bound = false;
   }
-  _clearSession(message = "") {
+  _clearSession(message = "", preserve = false) {
+    preserve = preserve && !!this._hass?.user?.id && !!this._hass.user.is_admin;
+    if (preserve && this._snapshot) {
+      this._retained = { owner: this._hass?.user?.id, snapshot: this._snapshot, saved: this._savedSnapshot,
+        currentDrafts: this._currentDrafts, dirty: this._dirty, editing: this._editing, editIndex: this._editIndex,
+        fields: Object.fromEntries(["current-lat", "current-lon", "history-lat", "history-lon", "history-time"].map((id) => [id, this.shadowRoot.querySelector(`#${id}`)?.value ?? ""])) };
+    } else if (!preserve) { this._retained = null; this._scenarioDrafts = {}; }
     this._cancelLocation();
     this._epoch++;
     this._token = null;
@@ -68,7 +86,9 @@ export class ManualLocationAdmin extends HTMLElement {
     this._busy = false;
     this._dirty = false;
     this._editing = false;
+    this._scenarios = null;
     clearTimeout(this._expiry);
+    clearTimeout(this._pollTimer); this._pollTimer = null;
     if (this.isConnected) { this._render(); this._message(message); }
   }
   _destroyMap() { this._editMarker?.remove(); this._editMarker = null; this._cancelLocation(); this._resize?.disconnect(); this._map?.remove(); this._map = null; this._locateButton = null; }
@@ -77,17 +97,57 @@ export class ManualLocationAdmin extends HTMLElement {
     if (box) { box.textContent = text; box.classList.toggle("good", good); box.hidden = !text; }
   }
   _changed() { this._dirty = true; this._saveState(); }
+  _hasDrafts() { return !!(this._dirty || this._editing || this._editIndex >= 0
+    || this._retained?.dirty || this._retained?.editing || this._retained?.editIndex >= 0
+    || Object.values(this._scenarioDrafts).some((draft) => draft.dirty || draft.editing)); }
+  _syncScenarios() {
+    const child = this.shadowRoot.querySelector("manual-location-scenarios");
+    if (!child || !this._token || !this._snapshot) return;
+    this._scenarios = child;
+    child.context = { drafts: this._scenarioDrafts,
+      getState: () => ({ hass: this._hass, token: this._token, snapshot: this._snapshot, entityId: this._selected,
+        busy: !!this._busy, parentDirty: !!(this._dirty || this._editing || this._editIndex >= 0) }),
+      onSnapshot: (snapshot) => this._acceptScenarioSnapshot(snapshot),
+      onStateChange: () => this._saveState(),
+      onExpired: (text) => this._clearSession(`${text} Szkice zachowano w tej karcie.`, true),
+    };
+  }
+  _acceptScenarioSnapshot(snapshot) {
+    if (!this._token || this._dirty || this._editing || this._editIndex >= 0) return false;
+    this._snapshot = snapshot; this._savedSnapshot = structuredClone(snapshot);
+    const global = this.shadowRoot.querySelector("#global-enabled"); if (global) global.checked = snapshot.enabled;
+    this._refreshPerson(false); this._saveState(); return true;
+  }
+  _schedulePoll() {
+    clearTimeout(this._pollTimer);
+    if (!this._token || !this.isConnected) return;
+    this._pollTimer = setTimeout(async () => { await this._poll(); this._schedulePoll(); }, 5000);
+  }
+  async _poll() {
+    if (!this._token || this._busy || this._scenarios?.busy || this._hasDrafts()) return;
+    const token = this._token, epoch = this._epoch;
+    try {
+      const snapshot = await callWS(this._hass, { type: "manual_location/admin_get", token });
+      if (epoch === this._epoch && token === this._token && !this._busy && !this._scenarios?.busy && !this._hasDrafts()
+        && (snapshot.revision !== this._snapshot.revision || JSON.stringify(snapshot.scenarios) !== JSON.stringify(this._snapshot.scenarios))) this._acceptScenarioSnapshot(snapshot);
+    } catch (error) {
+      if (epoch !== this._epoch || token !== this._token) return;
+      if (["invalid_token", "pin_required", "unauthorized", "forbidden"].includes(error?.code)) this._clearSession(errorText(error), true);
+      else this._message(errorText(error));
+    }
+  }
   _saveState() {
     const status = this.shadowRoot.querySelector("#save-state");
     if (status) status.textContent = this._editIndex >= 0 ? "Zastosuj albo anuluj edycję punktu przed zapisem" : this._dirty ? "Masz niezapisane zmiany" : `Zapisane · rewizja ${this._snapshot?.revision}`;
     const save = this.shadowRoot.querySelector("#save");
-    if (save) save.disabled = this._busy || !this._dirty || this._editIndex >= 0;
+    if (save) save.disabled = this._busy || this._scenarios?.busy || !this._dirty || this._editIndex >= 0;
     const layout = this.shadowRoot.querySelector(".layout");
-    if (layout) layout.inert = this._busy;
+    if (layout) layout.inert = !!(this._busy || this._scenarios?.busy);
     const reload = this.shadowRoot.querySelector("#reload");
-    if (reload) reload.disabled = this._busy;
+    if (reload) reload.disabled = !!(this._busy || this._scenarios?.busy);
     const pinChange = this.shadowRoot.querySelector(".pin-change");
-    if (pinChange) pinChange.inert = this._busy;
+    if (pinChange) pinChange.inert = !!(this._busy || this._scenarios?.busy);
+    this._syncScenarios();
   }
 
   _render() {
@@ -105,6 +165,7 @@ export class ManualLocationAdmin extends HTMLElement {
       <div class="layout"><aside class="sidebar"><section class="box"><h2>Ustawienia map</h2><label class="toggle"><input type="checkbox" id="global-enabled"><span>Włącz ręczne lokalizacje<small>Wyłączenie przywraca dane HA</small></span></label><div class="field" style="margin-top:24px"><label for="person">Osoba</label><select id="person"></select></div><label class="toggle"><input type="checkbox" id="person-enabled"><span>Włącz dla tej osoby</span></label><p class="notice">Nowa osoba jest włączona po ustawieniu pierwszej pozycji i zapisaniu zmian.</p><p class="notice" id="missing-person-notice" hidden>Tej osoby nie ma już w Home Assistant. Usuń jej ustawienia poniżej, a następnie zapisz wszystkie zmiany. Pozostałe osoby zachowają swoje ustawienia.</p><button class="wide danger" id="remove-person">Usuń ustawienia tej osoby</button></section>
       <section class="box"><h2>Bieżąca pozycja</h2><p class="current-summary" id="current-summary"></p><div class="field"><button class="wide" id="use-device-location">Użyj lokalizacji tego urządzenia</button><p class="sub">Jednorazowy odczyt z telefonu lub komputera, na którym otwarto panel. Wymaga zgody na lokalizację; dokładność zależy od urządzenia.</p></div><div class="pair"><div class="field"><label for="current-lat">Szerokość</label><input id="current-lat" type="number" step="any" min="-90" max="90"></div><div class="field"><label for="current-lon">Długość</label><input id="current-lon" type="number" step="any" min="-180" max="180"></div></div><button class="wide" id="set-current">Ustaw bieżącą pozycję</button><p class="sub">Każde ustawienie dodaje osobny szkic z godziną. Przed zapisem możesz zmienić jego czas i współrzędne albo go usunąć.</p></section></aside>
       <section><div class="box mapbox"><div class="map" id="map" aria-label="Mapa wyboru pozycji"></div><div class="caption">Kliknij mapę, aby uzupełnić współrzędne. Następnie ustaw pozycję lub dodaj punkt historii.</div><div class="map-edit-tools" id="map-edit-tools" hidden><p id="map-edit-status" role="status"></p><div class="actions"><button class="primary" id="apply-map-edit" type="submit" form="history-form">Zastosuj edycję</button><button id="cancel-map-edit" type="button">Anuluj edycję</button></div></div></div><section class="box history"><div class="history-top"><h2>Historia</h2><span class="eyebrow" id="count"></span></div><p class="sub">Od najnowszych do najstarszych. Fioletowe pozycje czekają na zapis.</p><div class="savebar"><button class="primary" id="save">Zapisz wszystkie zmiany</button><span id="save-state"></span><button id="reload">Wczytaj zapisane dane</button></div><div class="scroll" id="history-list"></div><form id="history-form" class="history-editor"><div class="field"><label for="history-lat">Szerokość</label><input id="history-lat" type="number" step="any" min="-90" max="90" required></div><div class="field"><label for="history-lon">Długość</label><input id="history-lon" type="number" step="any" min="-180" max="180" required></div><div class="field timefield"><label for="history-time">Lokalna data i godzina</label><input id="history-time" type="datetime-local" step="1" required></div><button id="add-history" type="submit">Dodaj punkt</button></form><button id="cancel-edit" hidden>Anuluj edycję punktu</button></section></section></div>
+      <manual-location-scenarios></manual-location-scenarios>
       <details class="pin-change"><summary>Zmień PIN administratora</summary><form id="pin-form"><div class="field"><label for="new-pin">Nowy PIN (4–12 znaków: litery A–Z, a–z lub cyfry)</label><input id="new-pin" type="password" pattern="[A-Za-z0-9]{4,12}" minlength="4" maxlength="12" autocomplete="off" required></div><button type="submit">Zmień PIN i zablokuj sesje</button></form></details>`}</main>`;
     if (!admin) return;
     if (!unlocked) {
@@ -156,7 +217,11 @@ export class ManualLocationAdmin extends HTMLElement {
     }
     if (!persons.some((p) => p.id === this._selected)) this._selected = persons[0]?.id || "";
     select.value = this._selected;
-    select.addEventListener("change", () => { this._selected = select.value; this._editIndex = -1; this._refreshPerson(); });
+    select.addEventListener("change", () => {
+      if (this._scenarios?.busy || this._busy) { select.value = this._selected; return; }
+      if ((this._editing || this._editIndex >= 0) && !window.confirm("Zmienić osobę? Niezastosowane pola bieżącej pozycji i historii zostaną odrzucone. Przygotowane pozycje, historia i szkice planów pozostaną.")) { select.value = this._selected; return; }
+      this._selected = select.value; this._editIndex = -1; this._editing = false; this._refreshPerson(); this._saveState();
+    });
     const global = this.shadowRoot.querySelector("#global-enabled");
     global.checked = this._snapshot.enabled;
     global.addEventListener("change", () => { this._snapshot.enabled = global.checked; this._changed(); });
@@ -212,7 +277,7 @@ export class ManualLocationAdmin extends HTMLElement {
       else delete this._snapshot.persons[this._selected];
     }
   }
-  _refreshPerson() {
+  _refreshPerson(fit = true) {
     this._cancelLocation();
     const person = this._person();
     const missing = !this._hass.states[this._selected];
@@ -229,7 +294,8 @@ export class ManualLocationAdmin extends HTMLElement {
       : "Wybierz punkt na mapie, aby ustawić pierwszą pozycję.";
     this.shadowRoot.querySelector("#history-time").value = localDateInput();
     this._refreshHistory();
-    this._drawPerson(true);
+    this._drawPerson(fit);
+    this._syncScenarios();
   }
   _cancelLocation() {
     if (this._locationRequest) this._message("Pobieranie lokalizacji anulowane.");
@@ -387,7 +453,9 @@ export class ManualLocationAdmin extends HTMLElement {
     this.shadowRoot.querySelector("#history-lat").value = current?.latitude ?? "";
     this.shadowRoot.querySelector("#history-lon").value = current?.longitude ?? "";
     this.shadowRoot.querySelector("#history-time").value = localDateInput();
+    this._editing = false;
     this._refreshHistory();
+    this._saveState();
     this._message("Edycja punktu anulowana.", true);
   }
   _drawPerson(fit = false) {
@@ -424,6 +492,7 @@ export class ManualLocationAdmin extends HTMLElement {
       (this._currentDrafts[this._selected] ||= []).push(point.timestamp);
       this._syncCurrentDrafts();
       this._editIndex = -1;
+      this._editing = false;
       this._changed(); this._refreshPerson(); this._refreshHistory(point);
       this._message("Dodano szkic z godziną. Możesz dodać kolejne, edytować lub usunąć je przed wspólnym zapisem.", true);
     } catch (error) { this._message(error.message); }
@@ -442,6 +511,7 @@ export class ManualLocationAdmin extends HTMLElement {
         this._syncCurrentDrafts(); this._refreshPerson();
       }
       this._editIndex = -1;
+      this._editing = false;
       this._changed(); this._refreshHistory(point); this._drawPerson();
       this._message("Punkt przygotowany. Zapisz wszystkie zmiany, aby zaktualizować karty.", true);
     } catch (error) { this._message(error.message); }
@@ -474,13 +544,26 @@ export class ManualLocationAdmin extends HTMLElement {
       this._token = session.token;
       this._snapshot = snapshot;
       this._savedSnapshot = structuredClone(snapshot);
-      this._expiry = setTimeout(() => this._clearSession("Sesja wygasła. Odblokuj panel ponownie."), Math.max(1, session.expires_in - 2) * 1000);
+      const retained = this._retained?.owner === this._hass.user.id ? this._retained : null;
+      const restoreParent = retained && (retained.dirty || retained.editing || retained.editIndex >= 0);
+      if (restoreParent) {
+        this._snapshot = retained.snapshot; this._savedSnapshot = retained.saved;
+        this._currentDrafts = retained.currentDrafts; this._dirty = retained.dirty; this._editing = retained.editing; this._editIndex = retained.editIndex;
+      } else { this._dirty = false; this._editing = false; this._editIndex = -1; }
+      this._retained = null;
+      this._expiry = setTimeout(() => this._clearSession("Sesja wygasła. Odblokuj panel ponownie; szkice zachowano w tej karcie.", true), Math.max(1, session.expires_in - 2) * 1000);
       this._render();
+      if (restoreParent) {
+        for (const [id, value] of Object.entries(retained.fields)) this.shadowRoot.querySelector(`#${id}`).value = value;
+        this._previewEdit();
+        this._message(snapshot.revision !== this._snapshot.revision ? "Szkice przywrócono. Dane HA zmieniły się podczas blokady; zapis może wymagać ponownego wczytania danych." : "Szkice przywrócono. Możesz kontynuować edycję.", true);
+      }
+      this._schedulePoll();
     } catch (error) { if (epoch === this._epoch) this._message(errorText(error)); }
     finally { if (epoch === this._epoch) { this._busy = false; this._saveState(); } }
   }
   async _admin(type, extra = {}) {
-    if (this._busy || !this._token) return null;
+    if (this._busy || this._scenarios?.busy || !this._token) return null;
     this._cancelLocation();
     const epoch = this._epoch;
     this._busy = true;
@@ -490,7 +573,7 @@ export class ManualLocationAdmin extends HTMLElement {
       return epoch === this._epoch ? { data } : null;
     } catch (error) {
       if (epoch === this._epoch) {
-        if (["invalid_token", "pin_required", "unauthorized", "forbidden"].includes(error?.code)) this._clearSession(errorText(error));
+        if (["invalid_token", "pin_required", "unauthorized", "forbidden"].includes(error?.code)) this._clearSession(`${errorText(error)} Szkice zachowano w tej karcie.`, true);
         else this._message(errorText(error));
       }
       return null;
@@ -498,33 +581,38 @@ export class ManualLocationAdmin extends HTMLElement {
   }
   async _save() {
     if (this._editIndex >= 0) { this._message("Najpierw zastosuj albo anuluj edycję punktu."); return; }
-    const result = await this._admin("admin_save", structuredClone(this._snapshot));
+    const result = await this._admin("admin_save", { revision: this._snapshot.revision, enabled: this._snapshot.enabled, persons: structuredClone(this._snapshot.persons) });
     if (!result) return;
     this._snapshot = result.data;
     this._savedSnapshot = structuredClone(result.data);
     this._currentDrafts = {};
     this._dirty = false;
+    this._editing = false;
     this._editIndex = -1;
     this._refreshPerson(); this._saveState();
     this._message("Zapisano. Wszystkie karty odczytają zmiany w ciągu 5 sekund.", true);
   }
   async _reload() {
-    if (this._dirty && !window.confirm("Wczytać zapisane dane? Niezapisane zmiany w tym formularzu zostaną odrzucone.")) return;
+    if (this._hasDrafts() && !window.confirm("Wczytać zapisane dane? Niezapisane pozycje, historia i szkice planów w tej karcie zostaną odrzucone.")) return;
     const result = await this._admin("admin_get");
     if (!result) return;
     this._snapshot = result.data;
     this._savedSnapshot = structuredClone(result.data);
     this._currentDrafts = {};
-    this._dirty = false; this._editIndex = -1;
+    this._scenarioDrafts = {};
+    this._dirty = false; this._editing = false; this._editIndex = -1;
     this._render();
     this._message("Wczytano zapisane dane.", true);
   }
   async _lock() {
+    if (this._busy || this._scenarios?.busy) return;
+    if (this._hasDrafts() && !window.confirm("Zablokować panel i odrzucić niezapisane pozycje, historię oraz szkice planów? Zapisane dane pozostaną w HA.")) return;
     const token = this._token;
     this._clearSession("Panel zablokowany.");
     if (token) { try { await callWS(this._hass, { type: "manual_location/lock", token }); } catch { /* The local token is already forgotten. */ } }
   }
   async _changePin() {
+    if (this._hasDrafts() && !window.confirm("Zmiana PIN-u zablokuje panel i odrzuci niezapisane pozycje, historię oraz szkice planów. Kontynuować?")) return;
     const input = this.shadowRoot.querySelector("#new-pin");
     const new_pin = input.value;
     input.value = "";

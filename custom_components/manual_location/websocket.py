@@ -18,6 +18,8 @@ FIELDS = {
     "unlock": {"pin"},
     "admin_get": {"token"},
     "admin_save": {"token", "revision", "enabled", "persons"},
+    "scenario_save": {"token", "revision", "entity_id", "name", "points"},
+    "scenario_action": {"token", "revision", "entity_id", "action"},
     "lock": {"token"},
     "change_pin": {"token", "new_pin"},
 }
@@ -38,7 +40,12 @@ async def async_handle_command(hass, connection, msg):
             raise LocationError("unauthorized")
         if (coordinator := hass.data.get(DOMAIN)) is None:
             raise LocationError("not_loaded")
-        if set(msg) - {"id", "type"} != FIELDS[operation]:
+        fields = set(msg) - {"id", "type"}
+        # 0.1.9 sends its entire admin snapshot. Its echoed scenarios are
+        # read-only and must never overwrite the server's authoritative plans.
+        if operation == "admin_save":
+            fields.discard("scenarios")
+        if fields != FIELDS[operation]:
             raise LocationError("invalid_input")
         if operation == "version":
             result = {"version": coordinator.version}
@@ -50,6 +57,14 @@ async def async_handle_command(hass, connection, msg):
             result = coordinator.admin_get(connection, msg["token"])
         elif operation == "admin_save":
             result = await coordinator.async_save(connection, msg["token"], msg["revision"], msg["enabled"], msg["persons"])
+        elif operation == "scenario_save":
+            result = await coordinator.async_save_scenario(
+                connection, msg["token"], msg["revision"], msg["entity_id"], msg["name"], msg["points"],
+            )
+        elif operation == "scenario_action":
+            result = await coordinator.async_scenario_action(
+                connection, msg["token"], msg["revision"], msg["entity_id"], msg["action"],
+            )
         elif operation == "change_pin":
             result = await coordinator.async_change_pin(connection, msg["token"], msg["new_pin"])
         else:

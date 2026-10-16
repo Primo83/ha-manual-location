@@ -80,6 +80,18 @@ Okno mapy nie usuwa zapisanej historii z panelu administratora. Bieżący marker
 
 Wzorzec zgodności: [renderer HA frontend 20260826.7](https://github.com/home-assistant/frontend/blob/20260826.7/src/components/map/ha-map.ts) oraz [karta mapy](https://github.com/home-assistant/frontend/blob/20260826.7/src/panels/lovelace/cards/hui-map-card.ts). Uwzględniono prawidłową, skończoną przezroczystość także dla pojedynczego punktu i trasy z dwoma punktami.
 
+## Scenariusz trasy na dzień
+
+W panelu administratora wybierz osobę i przygotuj scenariusz: nazwę, punkty na mapie oraz ich lokalne daty i godziny. Jeden scenariusz obejmuje jeden dzień w strefie czasowej HA, maksymalnie 500 punktów o różnych godzinach. Odstępy mogą być dowolne. Oczekujące punkty można edytować i usuwać; wykonane pozostają częścią historii.
+
+**Zapisz scenariusz** przechowuje plan. Dopiero **Uruchom** włącza wykonanie. O zaplanowanej porze HA ustawia kolejny punkt jako bieżącą pozycję i dopisuje go do ręcznej historii, widocznej w kartach mapy. Przyszłe punkty widać wyłącznie w podglądzie planu administratora. Telefon ani otwarta przeglądarka nie są wymagane; HA musi działać.
+
+Po przerwie HA uruchomiony plan uzupełnia zaległe punkty z ich oryginalnymi godzinami i ustawia ostatni należny jako bieżący. **Zatrzymaj** zachowuje wykonaną historię i nie wznawia planu samoczynnie. Ręczny zapis zmienionej pozycji lub historii danej osoby oraz wyłączenie ręcznych lokalizacji zatrzymują jej aktywny scenariusz. Usunięcie planu zachowuje już wykonaną historię.
+
+Zarządzanie scenariuszem wymaga odblokowanego panelu administratora. Po świadomym uruchomieniu wygaśnięcie sesji PIN nie przerywa trasy. Konflikt godzin z zapisaną historią, limit historii, brak osoby lub jej wyłączenie zatrzymują wykonanie z informacją o przyczynie. Plan dotyczy map Manual Location; dane encji person/GPS i Recorder pozostają oddzielne.
+
+Przed aktualizacją wykonaj kopię konfiguracji HA. Wersja 0.1.10 odczytuje dotychczasowe dane; starsza 0.1.9 nie rozpoznaje zapisów zawierających scenariusze. Powrót do 0.1.9 wymaga także przywrócenia kopii danych integracji sprzed aktualizacji.
+
 ## Edycja punktu na mapie
 
 Kliknij **Edytuj** przy zapisanym punkcie lub szkicu: mapa pokaże wyróżniony pomarańczowy znacznik z datą i godziną. Kliknięcie nowego miejsca zmienia jego podgląd i współrzędne w formularzu. Ręczne wpisanie współrzędnych również przesuwa znacznik. Godzina pozostaje zachowana, dopóki nie zmienisz jej w polu czasu. Niepoprawne współrzędne lub czas ukrywają podgląd do poprawienia formularza.
