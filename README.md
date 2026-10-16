@@ -36,7 +36,7 @@ Można zachować również `geo_location_sources`, np. źródło Blitzortung, je
 - Lokalizacja urządzenia wymaga HTTPS oraz uprawnień przeglądarki/aplikacji i systemu. Na Windows wynik może być przybliżony — sprawdź podaną dokładność. Funkcja dotyczy urządzenia z otwartym panelem, nie zdalnego pobrania pozycji innego telefonu. [Geolocation API](https://developer.mozilla.org/en-US/docs/Web/API/Geolocation/getCurrentPosition).
 - Dane ręczne są wspólne dla wszystkich kart i odświeżają się co około 5 sekund.
 - Po skonfigurowaniu osoby funkcja jest włączona. Wyłączenie jej w panelu przywraca prezentację oryginalnych danych HA dla tej osoby.
-- Bieżąca pozycja i historia są osobne. Zmiana bieżącej pozycji dopisuje punkt historyczny; edycja lub usunięcie historii nie przesuwają bieżącego markera.
+- Bieżąca pozycja jest przechowywana osobno, ale zawsze ma widoczny wiersz na liście. Usunięcie innego punktu historii jej nie przesuwa; usunięcie punktu oznaczonego „Bieżąca pozycja” wybiera najnowszy pozostały punkt z jego oryginalną godziną. Zmiana bieżącej pozycji dopisuje punkt historyczny.
 - Aktywna osoba korzysta wyłącznie z ręcznej historii. Przy błędzie odczytu lub ponownym łączeniu karta ukrywa lokalizacje do czasu poprawnego odczytu ustawień.
 - Zwykły użytkownik nie ma dostępu do panelu administracyjnego. PIN ma limit prób i czasową sesję.
 
@@ -71,8 +71,10 @@ Klient z wersją starszą niż 0.1.4 nie ma jeszcze tego mechanizmu: przy pierws
 
 Każde kliknięcie **Ustaw bieżącą pozycję** z innymi współrzędnymi dodaje osobny fioletowy szkic z datą i godziną. Możesz przygotować kilka szkiców, zmienić ich czas i współrzędne przyciskiem **Edytuj** albo usunąć je ikoną kosza. Lista jest uporządkowana od najnowszych do najstarszych; punkt z wcześniejszą godziną trafia między odpowiednie wpisy. **Zapisz wszystkie zmiany** znajduje się pod mapą, bezpośrednio nad listą. Zapis zachowuje przygotowane czasy bez dodatkowej kopii bieżącego punktu.
 
-Bieżącą pozycją po zapisie będzie najnowszy szkic dodany przyciskiem **Ustaw bieżącą pozycję** (także po edycji jego czasu). Usunięcie wszystkich takich szkiców istniejącej osoby przywraca jej zapisaną pozycję, zachowując inne zmiany historii. Dla nowej osoby pozostawione punkty są zachowane, a najnowszy staje się bieżącym; usunięcie ostatniego punktu usuwa jej roboczą konfigurację. Edycja samej zapisanej historii nadal nie przesuwa bieżącej pozycji. Oznaczenia znikają dopiero po potwierdzonym zapisie lub wczytaniu danych; inne karty otrzymują zmiany po zapisie.
+Bieżącą pozycją po zapisie będzie najnowszy szkic dodany przyciskiem **Ustaw bieżącą pozycję** (także po edycji jego czasu). Usunięcie wszystkich takich szkiców istniejącej osoby przywraca jej zapisaną pozycję, o ile nie została wcześniej jawnie usunięta; zachowuje pozostałe zmiany historii. Dla nowej osoby pozostawione punkty są zachowane, a najnowszy staje się bieżącym; usunięcie ostatniego punktu usuwa jej roboczą konfigurację. Edycja samej zapisanej historii nadal nie przesuwa bieżącej pozycji. Oznaczenia znikają dopiero po potwierdzonym zapisie lub wczytaniu danych; inne karty otrzymują zmiany po zapisie.
 ## Historia jak w natywnej mapie
+
+Bieżąca pozycja jest pokazana na liście również wtedy, gdy jej wpis został wcześniej usunięty z historii. Ma oznaczenie **Bieżąca pozycja** i kosz. Jej usunięcie wybiera najnowszy pozostały punkt; mapa panelu zmienia się od razu, a karty po **Zapisz wszystkie zmiany**. Usuwanie innych punktów historii zachowuje bieżący marker. Gdy usuwasz ostatnią ręczną pozycję, panel wymaga potwierdzenia usunięcia ustawień osoby i informuje o powrocie kart do danych HA po zapisie. Anulowanie niczego nie usuwa.
 
 Długość widocznej trasy określa `hours_to_show` w każdej karcie. Wartość `24` oznacza przesuwające się ostatnie 24 godziny, a `0` wyłącza trasę. Starsze punkty i odcinki są bledsze, nowsze wyraźniejsze: stopniowanie zależy od ich kolejności, tak jak w natywnym rendererze Home Assistant. Początkowy stan sprzed okna jest pokazywany na jego granicy, jeśli w tym momencie nie ma już punktu. Po wskazaniu punktu można odczytać czas.
 

@@ -1,5 +1,5 @@
-import { callWS, coordinates, errorText } from "./data.js?v=0.1.12";
-import { L, makeMap, mapStyles, setMapHass } from "./map-common.js?v=0.1.12";
+import { callWS, coordinates, errorText } from "./data.js?v=0.1.13";
+import { L, makeMap, mapStyles, setMapHass } from "./map-common.js?v=0.1.13";
 
 const STATUS = { draft: "Przygotowany", running: "Uruchomiony", stopped: "Zatrzymany", completed: "Ukończony" };
 const REASON = { global_disabled: "Wyłączono ręczne lokalizacje.", person_missing: "Tej osoby nie ma w HA.",

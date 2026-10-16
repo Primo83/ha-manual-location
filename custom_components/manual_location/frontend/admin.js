@@ -1,7 +1,7 @@
-import { adminPersonOptions, callWS, editHistory, errorText, localDateInput, readPoint, removeHistory } from "./data.js?v=0.1.12";
-import { L, makeMap, mapStyles, popup } from "./map-common.js?v=0.1.12";
-import { registerReloadBlocker, startUpdateCheck } from "./updates.js?v=0.1.12";
-import "./scenarios.js?v=0.1.12";
+import { adminPersonOptions, callWS, editHistory, errorText, localDateInput, readPoint, removeHistory } from "./data.js?v=0.1.13";
+import { L, makeMap, mapStyles, popup } from "./map-common.js?v=0.1.13";
+import { registerReloadBlocker, startUpdateCheck } from "./updates.js?v=0.1.13";
+import "./scenarios.js?v=0.1.13";
 
 const DRAFT_COLOR = "#7c3aed";
 const EDIT_COLOR = "#c65d00";
@@ -16,6 +16,7 @@ export class ManualLocationAdmin extends HTMLElement {
     this._selected = "";
     this._editIndex = -1;
     this._currentDrafts = {};
+    this._removedCurrent = {};
     this._scenarioDrafts = {};
     this._scenarioView = { selectedByEntity: {}, personFilter: "", statusFilter: "", nextLocal: 0 };
     const markEditing = (event) => {
@@ -74,7 +75,7 @@ export class ManualLocationAdmin extends HTMLElement {
     preserve = preserve && !!this._hass?.user?.id && !!this._hass.user.is_admin;
     if (preserve && this._snapshot) {
       this._retained = { owner: this._hass?.user?.id, snapshot: this._snapshot, saved: this._savedSnapshot,
-        currentDrafts: this._currentDrafts, dirty: this._dirty, editing: this._editing, editIndex: this._editIndex,
+        currentDrafts: this._currentDrafts, removedCurrent: this._removedCurrent, dirty: this._dirty, editing: this._editing, editIndex: this._editIndex,
         fields: Object.fromEntries(["current-lat", "current-lon", "history-lat", "history-lon", "history-time"].map((id) => [id, this.shadowRoot.querySelector(`#${id}`)?.value ?? ""])) };
     } else if (!preserve) {
       this._retained = null; this._scenarioDrafts = {};
@@ -86,6 +87,7 @@ export class ManualLocationAdmin extends HTMLElement {
     this._snapshot = null;
     this._savedSnapshot = null;
     this._currentDrafts = {};
+    this._removedCurrent = {};
     this._editIndex = -1;
     this._busy = false;
     this._dirty = false;
@@ -102,6 +104,7 @@ export class ManualLocationAdmin extends HTMLElement {
   }
   _changed() { this._dirty = true; this._saveState(); }
   _hasDrafts() { return !!(this._dirty || this._editing || this._editIndex >= 0
+    || Object.keys(this._removedCurrent).length || Object.keys(this._retained?.removedCurrent || {}).length
     || this._retained?.dirty || this._retained?.editing || this._retained?.editIndex >= 0
     || Object.values(this._scenarioDrafts).some((draft) => draft.dirty || draft.editing)); }
   _syncScenarios() {
@@ -110,7 +113,7 @@ export class ManualLocationAdmin extends HTMLElement {
     this._scenarios = child;
     child.context = { drafts: this._scenarioDrafts, view: this._scenarioView,
       getState: () => ({ hass: this._hass, token: this._token, snapshot: this._snapshot, entityId: this._selected,
-        busy: !!this._busy, parentDirty: !!(this._dirty || this._editing || this._editIndex >= 0) }),
+        busy: !!this._busy, parentDirty: !!(this._dirty || this._editing || this._editIndex >= 0 || Object.keys(this._removedCurrent).length) }),
       onSnapshot: (snapshot) => this._acceptScenarioSnapshot(snapshot),
       onStateChange: () => this._saveState(),
       onSelectPerson: (entityId) => this._selectPerson(entityId),
@@ -118,7 +121,7 @@ export class ManualLocationAdmin extends HTMLElement {
     };
   }
   _acceptScenarioSnapshot(snapshot) {
-    if (!this._token || this._dirty || this._editing || this._editIndex >= 0) return false;
+    if (!this._token || this._dirty || this._editing || this._editIndex >= 0 || Object.keys(this._removedCurrent).length) return false;
     this._snapshot = snapshot; this._savedSnapshot = structuredClone(snapshot);
     const global = this.shadowRoot.querySelector("#global-enabled"); if (global) global.checked = snapshot.enabled;
     this._refreshPerson(false); this._saveState(); return true;
@@ -173,7 +176,8 @@ export class ManualLocationAdmin extends HTMLElement {
       @media(max-width:900px){.layout{grid-template-columns:1fr}.sidebar{display:grid;grid-template-columns:1fr 1fr}.history-editor{grid-template-columns:1fr 1fr}.map{height:340px}}@media(max-width:580px){main{padding:22px 14px 36px}header{align-items:flex-start}h1{font-size:27px}.sidebar{display:flex}.box{padding:18px}.mapbox{padding:0}.history-editor{grid-template-columns:1fr 1fr}.history-editor .timefield{grid-column:1/-1}.footer{align-items:flex-start;flex-direction:column}.row{align-items:flex-start}.map{height:290px}}
       .map-edit-tools{padding:14px 18px;border-top:2px solid #c65d00;background:#c65d0010}.map-edit-tools p{margin:0 0 10px;font-size:13px;line-height:1.5}.map-edit-tools .actions{align-items:center}.leaflet-tooltip.edit-point-tooltip{white-space:normal;max-width:220px;border-color:#c65d00}
       .leaflet-tooltip.device-location-tooltip{width:180px;white-space:normal;text-align:center}
-      .layout>*,.sidebar>*,.field,input{min-width:0}.scroll{position:relative}.row>div:first-child{min-width:0;overflow-wrap:anywhere}.row .actions{flex-shrink:0}.trash{width:40px;display:grid;place-items:center}.savebar{display:flex;align-items:center;justify-content:space-between;gap:12px;flex-wrap:wrap;margin:16px 0 12px}@media(max-width:580px){.savebar{flex-direction:column;align-items:stretch}.savebar #save{order:1}}.savebar span{font-size:13px;color:var(--secondary-text-color,#657a82)}.row.draft{background:#7c3aed14;border-left:3px solid #7c3aed;padding-left:10px;padding-right:10px}.draft-badge{display:inline-block;margin-top:6px;font-size:12px;font-weight:700}.draft-badge::before{content:"";display:inline-block;width:8px;height:8px;border-radius:50%;background:#7c3aed;margin-right:6px}
+      .layout>*,.sidebar>*,.field,input{min-width:0}.scroll{position:relative}.row>div:first-child{min-width:0;overflow-wrap:anywhere}.row .actions{flex-shrink:0}.trash{width:40px;display:grid;place-items:center}.savebar{display:flex;align-items:center;justify-content:space-between;gap:12px;flex-wrap:wrap;margin:16px 0 12px}@media(max-width:580px){.savebar{flex-direction:column;align-items:stretch}.savebar #save{order:1}}.savebar span{font-size:13px;color:var(--secondary-text-color,#657a82)}.row.draft{background:#7c3aed14;border-left:3px solid #7c3aed;padding-left:10px;padding-right:10px}.draft-badge,.current-badge{display:inline-block;margin-top:6px;font-size:12px;font-weight:700}.draft-badge::before,.current-badge::before{content:"";display:inline-block;width:8px;height:8px;border-radius:50%;background:#7c3aed;margin-right:6px}
+      .current-badge::before{background:#176e82}
       </style><main>${unlocked ? '<header><div><div class="eyebrow">Manual Location</div><h1>Pozycje i historia</h1><p class="sub">Jeden zapis, wspólny dla wszystkich kart mapy.</p></div><button id="lock">Zablokuj panel</button></header><div id="message" role="status" hidden></div>' : ""}
       ${!admin ? '<section class="box lockbox"><h2>Ustawienia</h2><p class="sub">Zaloguj się na konto administratora Home Assistant.</p><div id="message" role="status" hidden></div></section>' : !unlocked ? '<section class="box lockbox"><h2>Odblokuj ustawienia</h2><div id="message" role="status" hidden></div><form id="unlock-form"><div class="field" style="margin-top:22px"><label for="pin">PIN administratora (4–12 znaków: litery A–Z, a–z lub cyfry)</label><input id="pin" type="password" pattern="[A-Za-z0-9]{4,12}" minlength="4" maxlength="12" autocomplete="one-time-code" data-1p-ignore autocapitalize="none" autocorrect="off" spellcheck="false" required></div><button class="primary wide" type="submit">Odblokuj</button></form></section>' : `
       <div class="layout"><aside class="sidebar"><section class="box"><h2>Ustawienia map</h2><label class="toggle"><input type="checkbox" id="global-enabled"><span>Włącz ręczne lokalizacje<small>Wyłączenie przywraca dane HA</small></span></label><div class="field" style="margin-top:24px"><label for="person">Osoba</label><select id="person"></select></div><label class="toggle"><input type="checkbox" id="person-enabled"><span>Włącz dla tej osoby</span></label><p class="notice">Nowa osoba jest włączona po ustawieniu pierwszej pozycji i zapisaniu zmian.</p><p class="notice" id="missing-person-notice" hidden>Tej osoby nie ma już w Home Assistant. Usuń jej ustawienia poniżej, a następnie zapisz wszystkie zmiany. Pozostałe osoby zachowają swoje ustawienia.</p><button class="wide danger" id="remove-person">Usuń ustawienia tej osoby</button></section>
@@ -265,15 +269,20 @@ export class ManualLocationAdmin extends HTMLElement {
   }
   _historyRows() {
     const saved = new Set((this._savedSnapshot?.persons[this._selected]?.history || []).map(historyKey));
-    return (this._person()?.history || []).map((point, index) => ({ point, index, draft: !saved.has(historyKey(point)) }))
-      .sort((a, b) => Date.parse(b.point.timestamp) - Date.parse(a.point.timestamp));
+    const current = this._person()?.current;
+    const rows = (this._person()?.history || []).map((point, index) => ({ point, index,
+      current: !!current && historyKey(point) === historyKey(current), draft: !saved.has(historyKey(point)) }));
+    if (current && !rows.some((row) => row.current)) rows.push({ point: current, index: -1, current: true, draft: this._currentChanged() });
+    return rows.sort((a, b) => Date.parse(b.point.timestamp) - Date.parse(a.point.timestamp));
   }
   _syncCurrentDrafts() {
     const person = this._person();
     const times = this._currentDrafts[this._selected] || [];
     const drafts = person.history.filter((point) => times.includes(point.timestamp));
-    if (!drafts.length && !this._savedSnapshot?.persons[this._selected] && person.history.length) {
-      // A new person still needs a current point; keep the other prepared rows.
+    const saved = this._savedSnapshot?.persons[this._selected];
+    const removed = saved && this._removedCurrent[this._selected] === historyKey(saved.current);
+    if (!drafts.length && (!saved || removed) && person.history.length) {
+      // A new person or a removed baseline needs a remaining historical point.
       drafts.push(person.history.at(-1));
       this._currentDrafts[this._selected] = [drafts[0].timestamp];
       this._message("Pozostałe szkice zachowano. Najnowszy z nich jest teraz bieżącą pozycją tej nowej osoby.", true);
@@ -283,8 +292,7 @@ export class ManualLocationAdmin extends HTMLElement {
       person.current_history_timestamp = person.current.timestamp;
     } else {
       delete person.current_history_timestamp;
-      const saved = this._savedSnapshot?.persons[this._selected];
-      if (saved) person.current = { ...saved.current };
+      if (saved && !removed) person.current = { ...saved.current };
       else delete this._snapshot.persons[this._selected];
     }
   }
@@ -376,12 +384,13 @@ export class ManualLocationAdmin extends HTMLElement {
     if (!history.length) {
       const empty = document.createElement("div");
       empty.className = "empty";
-      empty.textContent = "Brak punktów historii. Bieżąca pozycja pozostaje niezależna od trasy.";
+      empty.textContent = "Brak ręcznych punktów tej osoby.";
       list.append(empty);
     }
     this._previewEdit();
     this._saveState();
-    history.forEach(({ point, index, draft }) => {
+    const entityId = this._selected;
+    history.forEach(({ point, index, draft, current }) => {
       const row = document.createElement("div");
       row.className = draft ? "row draft" : "row";
       const info = document.createElement("div");
@@ -391,10 +400,10 @@ export class ManualLocationAdmin extends HTMLElement {
       const coords = document.createElement("small");
       coords.textContent = `${point.latitude.toFixed(5)}, ${point.longitude.toFixed(5)}`;
       info.append(time, coords);
-      if (draft) {
+      if (draft || current) {
         const badge = document.createElement("span");
-        badge.className = "draft-badge";
-        badge.textContent = point.timestamp === this._person().current_history_timestamp ? "Niezapisane · bieżąca pozycja" : "Niezapisane";
+        badge.className = draft ? "draft-badge" : "current-badge";
+        badge.textContent = draft ? current ? "Niezapisane · bieżąca pozycja" : "Niezapisane" : "Bieżąca pozycja";
         info.append(badge);
       }
       const actions = document.createElement("div");
@@ -419,16 +428,37 @@ export class ManualLocationAdmin extends HTMLElement {
       remove.title = "Usuń punkt";
       remove.innerHTML = '<svg viewBox="0 0 24 24" width="20" height="20" aria-hidden="true"><path d="M3 6h18M9 6V3h6v3M5 6l1 15h12l1-15M10 10v7m4-7v7" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"/></svg>';
       remove.setAttribute("aria-label", `Usuń punkt ${time.textContent}`);
-      remove.addEventListener("click", () => {
-        this._snapshot.persons[this._selected] = removeHistory(this._person(), index);
-        this._currentDrafts[this._selected] = (this._currentDrafts[this._selected] || []).filter((time) => time !== point.timestamp);
-        if (this._person().current_history_timestamp) this._syncCurrentDrafts();
-        this._editIndex = -1;
-        this._changed(); this._refreshPerson();
-      });
-      actions.append(edit, remove); row.append(info, actions); list.append(row);
+      remove.addEventListener("click", () => this._removePoint(entityId, historyKey(point)));
+      if (index >= 0) actions.append(edit);
+      actions.append(remove); row.append(info, actions); list.append(row);
       if (point === focusPoint) list.scrollTop = row.offsetTop;
     });
+  }
+  _removePoint(entityId, key) {
+    if (entityId !== this._selected || this._busy || this._scenarios?.busy || !this._token
+      || !this._hass.user?.is_admin || this._hass.connected === false || !this._hass.states[entityId]) return;
+    const row = this._historyRows().find(({ point }) => historyKey(point) === key);
+    if (!row) return;
+    const person = this._person(), saved = this._savedSnapshot?.persons[entityId];
+    const remaining = row.index >= 0 ? removeHistory(person, row.index).history : person.history.slice();
+    const times = this._currentDrafts[entityId] || [];
+    const remainingTimes = row.index >= 0 ? times.filter((time) => time !== row.point.timestamp) : times;
+    const removingBaseline = !!saved && key === historyKey(saved.current);
+    const baselineAvailable = saved && !removingBaseline && this._removedCurrent[entityId] !== historyKey(saved.current);
+    const undoDraft = row.current && row.index >= 0 && times.includes(row.point.timestamp) && !removingBaseline;
+    const next = undoDraft ? remaining.filter((point) => remainingTimes.includes(point.timestamp)).at(-1)
+      || (baselineAvailable ? saved.current : null) || remaining.at(-1) : remaining.at(-1);
+    // Confirm before changing either points or local undo metadata.
+    if (row.current && !next) { this._removePerson(); return; }
+    this._cancelLocation();
+    person.history = remaining; this._currentDrafts[entityId] = remainingTimes;
+    if (removingBaseline) this._removedCurrent[entityId] = key;
+    if (row.current && !undoDraft) {
+      person.current = { ...next }; person.current_history_timestamp = next.timestamp;
+      this._currentDrafts[entityId] = [next.timestamp];
+    } else if (person.current_history_timestamp) this._syncCurrentDrafts();
+    this._editIndex = -1; this._editing = false;
+    this._changed(); this._refreshPerson();
   }
   _readHistoryPoint() {
     const localTime = this.shadowRoot.querySelector("#history-time").value;
@@ -481,7 +511,7 @@ export class ManualLocationAdmin extends HTMLElement {
     const path = person.history.map((p) => [p.latitude, p.longitude]);
     if (currentChanged && !person.current_history_timestamp) path.push(current);
     if (path.length > 1) L.polyline(path, { color: "#176e82", weight: 3 }).addTo(this._layers);
-    for (const { point, draft } of this._historyRows().reverse()) L.circleMarker([point.latitude, point.longitude], { color: draft ? DRAFT_COLOR : "#ad6c34", radius: draft ? 6 : 4, fillOpacity: 1 }).bindPopup(popup(draft ? "Punkt historii · Niezapisane" : "Punkt historii", point)).addTo(this._layers);
+    for (const { point, draft, index } of this._historyRows().reverse()) if (index >= 0) L.circleMarker([point.latitude, point.longitude], { color: draft ? DRAFT_COLOR : "#ad6c34", radius: draft ? 6 : 4, fillOpacity: 1 }).bindPopup(popup(draft ? "Punkt historii · Niezapisane" : "Punkt historii", point)).addTo(this._layers);
     if (fit) this._map.fitBounds([current, ...path], { padding: [35, 35], maxZoom: 14 });
     this._previewEdit();
   }
@@ -531,6 +561,8 @@ export class ManualLocationAdmin extends HTMLElement {
   _removePerson() {
     if (this._busy || !this._person()) return;
     if (!window.confirm("Usunąć ręczną pozycję i całą historię tej osoby? Po zapisaniu wszystkich zmian karty wrócą do danych HA, jeśli osoba nadal istnieje.")) return;
+    const saved = this._savedSnapshot?.persons[this._selected];
+    if (saved) this._removedCurrent[this._selected] = historyKey(saved.current);
     delete this._snapshot.persons[this._selected];
     delete this._currentDrafts[this._selected];
     this._editIndex = -1;
@@ -556,10 +588,11 @@ export class ManualLocationAdmin extends HTMLElement {
       this._snapshot = snapshot;
       this._savedSnapshot = structuredClone(snapshot);
       const retained = this._retained?.owner === this._hass.user.id ? this._retained : null;
-      const restoreParent = retained && (retained.dirty || retained.editing || retained.editIndex >= 0);
+      const restoreParent = retained && (retained.dirty || retained.editing || retained.editIndex >= 0 || Object.keys(retained.removedCurrent || {}).length);
       if (restoreParent) {
         this._snapshot = retained.snapshot; this._savedSnapshot = retained.saved;
-        this._currentDrafts = retained.currentDrafts; this._dirty = retained.dirty; this._editing = retained.editing; this._editIndex = retained.editIndex;
+        this._currentDrafts = retained.currentDrafts; this._removedCurrent = retained.removedCurrent || {};
+        this._dirty = retained.dirty; this._editing = retained.editing; this._editIndex = retained.editIndex;
       } else { this._dirty = false; this._editing = false; this._editIndex = -1; }
       this._retained = null;
       this._expiry = setTimeout(() => this._clearSession("Sesja wygasła. Odblokuj panel ponownie; szkice zachowano w tej karcie.", true), Math.max(1, session.expires_in - 2) * 1000);
@@ -597,6 +630,7 @@ export class ManualLocationAdmin extends HTMLElement {
     this._snapshot = result.data;
     this._savedSnapshot = structuredClone(result.data);
     this._currentDrafts = {};
+    this._removedCurrent = {};
     this._dirty = false;
     this._editing = false;
     this._editIndex = -1;
@@ -610,6 +644,7 @@ export class ManualLocationAdmin extends HTMLElement {
     this._snapshot = result.data;
     this._savedSnapshot = structuredClone(result.data);
     this._currentDrafts = {};
+    this._removedCurrent = {};
     this._scenarioDrafts = {};
     this._scenarioView = { selectedByEntity: {}, personFilter: "", statusFilter: "", nextLocal: 0 };
     this._dirty = false; this._editing = false; this._editIndex = -1;
