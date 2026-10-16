@@ -237,6 +237,16 @@ class ManualLocation:
         self._retry_at = None
         self._storage_attempts = 0
         self._suspended = set()
+        self._geocoder = None
+
+    @property
+    def geocoder(self):
+        """Initialize optional search only when an administrator requests it."""
+        if self._geocoder is None:
+            from .geocoding import PlaceGeocoder
+
+            self._geocoder = PlaceGeocoder(self.hass, self.entry)
+        return self._geocoder
 
     async def async_load(self):
         stored = await self.store.async_load()

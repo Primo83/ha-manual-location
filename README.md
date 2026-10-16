@@ -82,6 +82,16 @@ Okno mapy nie usuwa zapisanej historii z panelu administratora. Bieżący marker
 
 Wzorzec zgodności: [renderer HA frontend 20260826.7](https://github.com/home-assistant/frontend/blob/20260826.7/src/components/map/ha-map.ts) oraz [karta mapy](https://github.com/home-assistant/frontend/blob/20260826.7/src/panels/lovelace/cards/hui-map-card.ts). Uwzględniono prawidłową, skończoną przezroczystość także dla pojedynczego punktu i trasy z dwoma punktami.
 
+## Wyszukiwanie miejsc i adresów — Geoapify Free
+
+Na mapie wyboru pozycji i w edytorze trasy wpisz nazwę miejsca albo pełny adres, a następnie kliknij **Szukaj** lub Enter. Wybierz jeden z maksymalnie pięciu wyników. Wybór uzupełnia współrzędne i podgląd; dzień oraz godzina pozostają zachowane. Punkt dodajesz/zatwierdzasz i zapisujesz osobno, a **Start** planu nadal jest osobną czynnością.
+
+Wymagane jest bezpłatne konto [Geoapify MyProjects](https://myprojects.geoapify.com/) i klucz projektu. Wpisz klucz osobiście w HA: **Ustawienia → Urządzenia i usługi → Manual Location → Konfiguruj**. Pole pozostaje puste przy kolejnym otwarciu; puste zatwierdzenie zachowuje dotychczasowy klucz, a osobna opcja pozwala go usunąć. Nie wklejaj klucza w zgłoszeniach lub czacie. Wyszukiwarka korzysta z klucza po stronie HA; odpowiedzi i pliki mapy go nie zawierają. Konfiguracja klucza nie wymaga następnego restartu.
+
+Zapytanie tekstowe jest wysyłane do Geoapify dopiero po świadomym wyszukaniu. Bieżące współrzędne ani pozycja GPS nie są automatycznie przesyłane. Wyniki preferują Polskę, ale obejmują również inne kraje. Sprawdź typ wyniku, numer i podgląd: wynik ulicy nie potwierdza konkretnego numeru budynku. Widoczne odnośniki **Powered by Geoapify** i **© OpenStreetMap** oraz informacja o źródle danych stanowią wymaganą atrybucję.
+
+Integracja ogranicza wywołania do **2500 na dzień UTC** i jednego na sekundę; licznik przetrwa restart. Ten limit obejmuje tylko tę integrację, nie inne zastosowania tego samego klucza. [Geoapify Free](https://www.geoapify.com/pricing/) udostępnia 3000 kredytów dziennie bez karty płatniczej. Wyszukiwarka nie przełącza konta na płatny plan i nie ponawia zapytań automatycznie. Brak wyników, limit lub awaria usługi daje komunikat; ręczny wybór na mapie nadal działa. Free nie obejmuje gwarancji SLA ani kompletności adresów. [Warunki Geoapify](https://www.geoapify.com/terms-and-conditions/).
+
 ## Scenariusz trasy na dzień
 
 Przy planie w **Bibliotece tras** kliknij **Duplikuj**, aby użyć go jako szablonu — także gdy jest już ukończony. Otworzy się niezależny szkic z dopiskiem „(kopia)”, ze wszystkimi zastosowanymi punktami i godzinami, bez postępu wykonania. Zmień **Dzień trasy**, dostosuj punkty i kliknij **Zapisz plan**. Godziny pozostają zgodne ze strefą HA; data ze zmianą czasu może wymagać wybrania innej, jednoznacznej godziny. Oryginał pozostaje zachowany. Kopia zacznie wykonanie dopiero po osobnym **Start**; niezastosowany formularz punktu źródłowego pozostaje w źródle.

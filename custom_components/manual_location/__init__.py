@@ -13,6 +13,7 @@ from homeassistant.loader import async_get_integration
 
 from .const import DOMAIN, PANEL_PATH, STATIC_PATH
 from .coordinator import LocationError, ManualLocation
+from .geocoding import PlaceGeocoder
 from .websocket import async_register_commands
 
 CONFIG_SCHEMA = cv.config_entry_only_config_schema(DOMAIN)
@@ -25,7 +26,7 @@ class FrontendView(HomeAssistantView):
     name = f"{DOMAIN}:frontend"
     requires_auth = False
     files = frozenset({
-        "admin.js", "data.js", "map-common.js", "map.js", "updates.js", "scenarios.js",
+        "admin.js", "data.js", "map-common.js", "map.js", "updates.js", "scenarios.js", "place-search.js",
         "vendor/leaflet.js", "vendor/leaflet.css",
         "vendor/images/layers-2x.png", "vendor/images/layers.png",
         "vendor/images/marker-icon-2x.png", "vendor/images/marker-icon.png",
@@ -80,3 +81,4 @@ async def async_unload_entry(hass, entry):
 async def async_remove_entry(hass, entry):
     """Delete this integration's manual data when its configuration is removed."""
     await ManualLocation(hass, entry).store.async_remove()
+    await PlaceGeocoder(hass, entry).store.async_remove()

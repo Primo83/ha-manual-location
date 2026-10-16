@@ -10,5 +10,21 @@
     },
     "error": {"invalid_pin": "Enter a PIN containing 4–12 characters: letters A–Z, a–z or digits."},
     "abort": {"already_configured": "Manual Location is already configured."}
+  },
+  "options": {
+    "step": {
+      "init": {
+        "title": "Optional place and address search",
+        "description": "Enter your Geoapify Free API key to enable search. Search text is sent to Geoapify only after Search or Enter. The Free plan has usage limits and no availability guarantee. A blank key keeps the current setting; check Remove to disable search. Manual maps and saving work without a key.",
+        "data": {
+          "geoapify_api_key": "Geoapify API key (leave blank to keep)",
+          "remove_api_key": "Remove the saved key and disable search"
+        }
+      }
+    },
+    "error": {
+      "invalid_api_key": "Enter 16–128 ASCII letters, digits, underscores or hyphens, or leave this field blank.",
+      "invalid_input": "Check the supplied values."
+    }
   }
 }

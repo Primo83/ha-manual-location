@@ -10,5 +10,21 @@
     },
     "error": {"invalid_pin": "Wpisz PIN składający się z 4–12 znaków: litery A–Z, a–z lub cyfry."},
     "abort": {"already_configured": "Integracja Manual Location jest już skonfigurowana."}
+  },
+  "options": {
+    "step": {
+      "init": {
+        "title": "Opcjonalna wyszukiwarka miejsc i adresów",
+        "description": "Wprowadź własny klucz Geoapify Free, aby włączyć wyszukiwanie. Tekst zapytania trafia do Geoapify wyłącznie po Szukaj lub Enter. Plan Free ma limity i nie gwarantuje dostępności. Puste pole zachowuje obecne ustawienie; zaznacz usunięcie, aby wyłączyć wyszukiwarkę. Ręczna mapa i zapis działają bez klucza.",
+        "data": {
+          "geoapify_api_key": "Klucz API Geoapify (puste pole zachowuje obecny)",
+          "remove_api_key": "Usuń zapisany klucz i wyłącz wyszukiwarkę"
+        }
+      }
+    },
+    "error": {
+      "invalid_api_key": "Wpisz 16–128 znaków ASCII: litery, cyfry, podkreślenia lub myślniki, albo pozostaw pole puste.",
+      "invalid_input": "Sprawdź wprowadzone wartości."
+    }
   }
 }

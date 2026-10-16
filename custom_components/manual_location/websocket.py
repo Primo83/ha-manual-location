@@ -17,6 +17,7 @@ FIELDS = {
     "view": {"entity_ids", "start", "end"},
     "unlock": {"pin"},
     "admin_get": {"token"},
+    "geocode": {"token", "query"},
     "admin_save": {"token", "revision", "enabled", "persons"},
     "scenario_save": {"token", "revision", "scenario_id", "entity_id", "day", "name", "points"},
     "scenario_action": {"token", "revision", "scenario_id", "action"},
@@ -57,6 +58,14 @@ async def async_handle_command(hass, connection, msg):
             result = await coordinator.async_unlock(connection, msg["pin"])
         elif operation == "admin_get":
             result = coordinator.admin_get(connection, msg["token"])
+        elif operation == "geocode":
+            coordinator.require_session(connection, msg["token"])
+            try:
+                result = await coordinator.geocoder.async_search(
+                    msg["query"], authorize=lambda: coordinator.require_session(connection, msg["token"]),
+                )
+            finally:
+                coordinator.require_session(connection, msg["token"])
         elif operation == "admin_save":
             result = await coordinator.async_save(connection, msg["token"], msg["revision"], msg["enabled"], msg["persons"])
         elif operation == "scenario_save":
