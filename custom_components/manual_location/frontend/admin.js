@@ -1,13 +1,15 @@
-import { adminPersonOptions, callWS, editHistory, errorText, localDateInput, readPoint, removeHistory } from "./data.js?v=0.1.19";
-import { L, makeMap, mapStyles, popup } from "./map-common.js?v=0.1.19";
-import { registerReloadBlocker, startUpdateCheck } from "./updates.js?v=0.1.19";
-import "./scenarios.js?v=0.1.19";
-import "./place-search.js?v=0.1.19";
+import { adminPersonOptions, callWS, editHistory, errorText, localDateInput, readPoint, removeHistory } from "./data.js?v=0.1.20";
+import { L, makeMap, mapStyles, popup } from "./map-common.js?v=0.1.20";
+import { registerReloadBlocker, startUpdateCheck } from "./updates.js?v=0.1.20";
+import "./scenarios.js?v=0.1.20";
+import "./place-search.js?v=0.1.20";
 
 const DRAFT_COLOR = "#7c3aed";
 const EDIT_COLOR = "#c65d00";
 const sameCoordinates = (a, b) => !!a && !!b && a.latitude === b.latitude && a.longitude === b.longitude;
 const templateKey = (point) => JSON.stringify([point.timestamp, point.latitude, point.longitude]);
+const deletedPointKey = (point) => JSON.stringify([Date.parse(point.timestamp),
+  (point.timestamp.match(/\.(\d+)/)?.[1] || "").slice(3).replace(/0+$/, ""), point.latitude, point.longitude]);
 const historyKey = (point) => `${Date.parse(point.timestamp)}:${point.latitude}:${point.longitude}`;
 
 export class ManualLocationAdmin extends HTMLElement {
@@ -19,6 +21,7 @@ export class ManualLocationAdmin extends HTMLElement {
     this._editIndex = -1;
     this._currentDrafts = {};
     this._removedCurrent = {};
+    this._deletedHistory = {};
     this._historySelection = new Set();
     this._historySelectionGeneration = 0;
     this._historyChecks = [];
@@ -27,7 +30,7 @@ export class ManualLocationAdmin extends HTMLElement {
     const markEditing = (event) => {
       if (["manual-location-scenarios", "manual-location-place-search"].includes(event.target?.tagName?.toLowerCase())) return;
       if (["person", "pin", "new-pin"].includes(event.target?.id) || event.target?.id?.startsWith("history-select-")) return;
-      this._editing = true; this._syncScenarios(); this._placeSearch?.sync?.();
+      this._editing = true; this._syncScenarios(); this._syncHistorySelection(); this._placeSearch?.sync?.();
     };
     this.shadowRoot.addEventListener("input", markEditing);
     this.shadowRoot.addEventListener("change", markEditing);
@@ -81,7 +84,8 @@ export class ManualLocationAdmin extends HTMLElement {
     preserve = preserve && !!this._hass?.user?.id && !!this._hass.user.is_admin;
     if (preserve && this._snapshot) {
       this._retained = { owner: this._hass?.user?.id, snapshot: this._snapshot, saved: this._savedSnapshot,
-        currentDrafts: this._currentDrafts, removedCurrent: this._removedCurrent, dirty: this._dirty, editing: this._editing, editIndex: this._editIndex,
+        currentDrafts: this._currentDrafts, removedCurrent: this._removedCurrent, deletedHistory: this._deletedHistory,
+        dirty: this._dirty, editing: this._editing, editIndex: this._editIndex,
         fields: Object.fromEntries(["current-lat", "current-lon", "history-lat", "history-lon", "history-time"].map((id) => [id, this.shadowRoot.querySelector(`#${id}`)?.value ?? ""])) };
     } else if (!preserve) {
       this._retained = null; this._scenarioDrafts = {};
@@ -95,6 +99,7 @@ export class ManualLocationAdmin extends HTMLElement {
     this._savedSnapshot = null;
     this._currentDrafts = {};
     this._removedCurrent = {};
+    this._deletedHistory = {};
     this._editIndex = -1;
     this._busy = false;
     this._dirty = false;
@@ -150,7 +155,7 @@ export class ManualLocationAdmin extends HTMLElement {
       : "Miejsce wybrane. Ustaw bieżącą pozycję lub dodaj punkt historii, a następnie zapisz zmiany.", true);
     return true;
   }
-  _hasDrafts() { return !!(this._dirty || this._editing || this._editIndex >= 0
+  _hasDrafts() { return !!(this._dirty || this._editing || this._editIndex >= 0 || Object.values(this._deletedHistory).some((points) => points.length)
     || Object.keys(this._removedCurrent).length || Object.keys(this._retained?.removedCurrent || {}).length
     || this._retained?.dirty || this._retained?.editing || this._retained?.editIndex >= 0
     || Object.values(this._scenarioDrafts).some((draft) => draft.dirty || draft.editing)); }
@@ -222,18 +227,19 @@ export class ManualLocationAdmin extends HTMLElement {
     const admin = this._hass?.user?.is_admin;
     const unlocked = admin && this._token && this._snapshot;
     this.shadowRoot.innerHTML = `<style>
-      :host{display:block;min-height:100%;color:var(--primary-text-color,#20343b);background:var(--primary-background-color,#f2f5f4);font-family:var(--paper-font-body1_-_font-family,"Segoe UI",sans-serif)}*{box-sizing:border-box}main{max-width:1220px;margin:auto;padding:32px 28px 56px}header{display:flex;justify-content:space-between;gap:20px;align-items:center;margin-bottom:24px}.eyebrow{text-transform:uppercase;letter-spacing:.16em;font-size:11px;font-weight:700;color:var(--secondary-text-color,#657a82);margin-bottom:8px}h1{font-family:Georgia,serif;font-size:32px;font-weight:400;margin:0}h2{font-size:17px;margin:0 0 18px}.sub{color:var(--secondary-text-color,#657a82);line-height:1.6;font-size:14px;margin:10px 0 0}.box{border:1px solid var(--divider-color,#d9e2e0);border-radius:12px;background:var(--card-background-color,#fff);padding:22px}.lockbox{max-width:480px;margin:58px auto}.layout{display:grid;grid-template-columns:320px minmax(0,1fr);gap:18px}.sidebar{display:flex;flex-direction:column;gap:18px}.mapbox{padding:0;overflow:hidden}.map{height:380px}.caption{padding:12px 18px;border-top:1px solid var(--divider-color,#d9e2e0);font-size:13px;color:var(--secondary-text-color,#657a82)}label{display:block;font-size:13px;font-weight:600;margin-bottom:7px}input,select,button{font:inherit}input,select{width:100%;min-height:42px;padding:9px 11px;background:var(--input-fill-color,var(--card-background-color,#fff));color:inherit;border:1px solid var(--divider-color,#c8d6d4);border-radius:7px}input:focus,select:focus{outline:2px solid #338b9c;outline-offset:1px}.field{margin-bottom:16px}.pair{display:grid;grid-template-columns:1fr 1fr;gap:10px}.toggle{display:flex;align-items:center;gap:10px;font-size:14px;font-weight:500;cursor:pointer}.toggle input{width:20px;min-height:20px;accent-color:#176e82}.toggle small{display:block;font-weight:400;color:var(--secondary-text-color,#657a82);margin-top:3px}button{min-height:40px;border-radius:7px;padding:9px 14px;cursor:pointer;background:transparent;color:inherit;border:1px solid var(--divider-color,#c8d6d4);font-size:13px;font-weight:600}button:hover:not(:disabled){background:#63889a16}button:focus-visible{outline:3px solid #338b9c;outline-offset:2px}button.primary{background:#176e82;color:white;border-color:#176e82}button.primary:hover:not(:disabled){background:#105769}button:disabled{opacity:.48;cursor:default}.wide{width:100%}.actions{display:flex;gap:8px;flex-wrap:wrap}.history{margin-top:18px}.history-top{display:flex;align-items:center;justify-content:space-between;gap:16px}.history-top h2{margin:0}.history-editor{display:grid;grid-template-columns:1fr 1fr 1.5fr auto;gap:10px;align-items:end;padding:20px 0}.history-editor .field{margin:0}.scroll{max-height:340px;overflow:auto;border-top:1px solid var(--divider-color,#d9e2e0)}.row{display:flex;align-items:center;justify-content:space-between;padding:13px 0;gap:12px;border-bottom:1px solid var(--divider-color,#e3e9e7)}.row time{display:block;font-size:13px;font-weight:600}.row small{display:block;margin-top:4px;color:var(--secondary-text-color,#657a82)}.row button{min-height:34px;padding:5px 10px}.danger{color:#b74435}.empty{padding:22px 0;color:var(--secondary-text-color,#657a82);font-size:14px;line-height:1.6}.footer{display:flex;align-items:center;justify-content:space-between;gap:18px;margin-top:20px;font-size:13px;color:var(--secondary-text-color,#657a82)}#message{margin:0 0 20px;padding:13px 16px;border-radius:8px;background:#a8402715;border:1px solid #a8402750;font-size:14px;line-height:1.5}#message.good{background:#34815e13;border-color:#34815e50}[hidden]{display:none!important}.current-summary{font-size:13px;line-height:1.6;color:var(--secondary-text-color,#657a82);margin:0 0 18px}.pin-change{margin-top:18px}.pin-change summary{cursor:pointer;font-size:13px}.pin-change form{margin-top:16px;max-width:400px}.notice{border-left:3px solid #176e82;padding-left:12px;font-size:13px;color:var(--secondary-text-color,#657a82);line-height:1.6}
+      :host{display:block;min-height:100%;color:var(--primary-text-color,#20343b);background:var(--primary-background-color,#f2f5f4);font-family:var(--paper-font-body1_-_font-family,"Segoe UI",sans-serif)}*{box-sizing:border-box}main{max-width:1220px;margin:auto;padding:32px 28px 56px}header{display:flex;justify-content:space-between;gap:20px;align-items:center;margin-bottom:24px}.eyebrow{text-transform:uppercase;letter-spacing:.16em;font-size:11px;font-weight:700;color:var(--secondary-text-color,#657a82);margin-bottom:8px}h1{font-family:Georgia,serif;font-size:32px;font-weight:400;margin:0}h2{font-size:17px;margin:0 0 18px}.sub{color:var(--secondary-text-color,#657a82);line-height:1.6;font-size:14px;margin:10px 0 0}.box{border:1px solid var(--divider-color,#d9e2e0);border-radius:12px;background:var(--card-background-color,#fff);padding:22px}.lockbox{max-width:480px;margin:58px auto}.layout{display:grid;grid-template-columns:320px minmax(0,1fr);gap:18px}.sidebar{display:flex;flex-direction:column;gap:18px}.mapbox{padding:0;overflow:hidden}.map{height:380px}.caption{padding:12px 18px;border-top:1px solid var(--divider-color,#d9e2e0);font-size:13px;color:var(--secondary-text-color,#657a82)}label{display:block;font-size:13px;font-weight:600;margin-bottom:7px}input,select,button{font:inherit}input,select{width:100%;min-height:42px;padding:9px 11px;background:var(--input-fill-color,var(--card-background-color,#fff));color:inherit;border:1px solid var(--divider-color,#c8d6d4);border-radius:7px}input:focus,select:focus{outline:2px solid #338b9c;outline-offset:1px}.field{margin-bottom:16px}.pair{display:grid;grid-template-columns:1fr 1fr;gap:10px}.toggle{display:flex;align-items:center;gap:10px;font-size:14px;font-weight:500;cursor:pointer}.toggle input{width:20px;min-height:20px;accent-color:#176e82}.toggle small{display:block;font-weight:400;color:var(--secondary-text-color,#657a82);margin-top:3px}button{min-height:40px;border-radius:7px;padding:9px 14px;cursor:pointer;background:transparent;color:inherit;border:1px solid var(--divider-color,#c8d6d4);font-size:13px;font-weight:600}button:hover:not(:disabled){background:#63889a16}button:focus-visible{outline:3px solid #338b9c;outline-offset:2px}button.primary{background:#176e82;color:white;border-color:#176e82}button.primary:hover:not(:disabled){background:#105769}button:disabled{opacity:.48;cursor:default}.wide{width:100%}.actions{display:flex;gap:8px;flex-wrap:wrap}.history{margin-top:18px}.history-top{display:flex;align-items:center;justify-content:space-between;gap:16px}.history-top h2{margin:0}.history-editor{display:grid;grid-template-columns:minmax(0,1fr) minmax(0,1fr) minmax(230px,1.5fr);gap:10px;align-items:end;padding:20px 0}.history-editor .field{margin:0}.history-editor .actions{grid-column:1/-1}.scroll{max-height:340px;overflow:auto;border-top:1px solid var(--divider-color,#d9e2e0)}.row{display:flex;align-items:center;justify-content:space-between;padding:13px 0;gap:12px;border-bottom:1px solid var(--divider-color,#e3e9e7)}.row time{display:block;font-size:13px;font-weight:600}.row small{display:block;margin-top:4px;color:var(--secondary-text-color,#657a82)}.row button{min-height:34px;padding:5px 10px}.danger{color:#b74435}.empty{padding:22px 0;color:var(--secondary-text-color,#657a82);font-size:14px;line-height:1.6}.footer{display:flex;align-items:center;justify-content:space-between;gap:18px;margin-top:20px;font-size:13px;color:var(--secondary-text-color,#657a82)}#message{margin:0 0 20px;padding:13px 16px;border-radius:8px;background:#a8402715;border:1px solid #a8402750;font-size:14px;line-height:1.5}#message.good{background:#34815e13;border-color:#34815e50}[hidden]{display:none!important}.current-summary{font-size:13px;line-height:1.6;color:var(--secondary-text-color,#657a82);margin:0 0 18px}.pin-change{margin-top:18px}.pin-change summary{cursor:pointer;font-size:13px}.pin-change form{margin-top:16px;max-width:400px}.notice{border-left:3px solid #176e82;padding-left:12px;font-size:13px;color:var(--secondary-text-color,#657a82);line-height:1.6}
       @media(max-width:900px){.layout{grid-template-columns:1fr}.sidebar{display:grid;grid-template-columns:1fr 1fr}.history-editor{grid-template-columns:1fr 1fr}.map{height:340px}}@media(max-width:580px){main{padding:22px 14px 36px}header{align-items:flex-start}h1{font-size:27px}.sidebar{display:flex}.box{padding:18px}.mapbox{padding:0}.history-editor{grid-template-columns:1fr 1fr}.history-editor .timefield{grid-column:1/-1}.footer{align-items:flex-start;flex-direction:column}.row{align-items:flex-start}.map{height:290px}}
       .map-edit-tools{padding:14px 18px;border-top:2px solid #c65d00;background:#c65d0010}.map-edit-tools p{margin:0 0 10px;font-size:13px;line-height:1.5}.map-edit-tools .actions{align-items:center}.leaflet-tooltip.edit-point-tooltip{white-space:normal;max-width:220px;border-color:#c65d00}
       .leaflet-tooltip.device-location-tooltip{width:180px;white-space:normal;text-align:center}
       .layout>*,.sidebar>*,.field,input{min-width:0}.scroll{position:relative}.row>div:first-child{min-width:0;overflow-wrap:anywhere}.row .actions{flex-shrink:0}.trash{width:40px;display:grid;place-items:center}.savebar{display:flex;align-items:center;justify-content:space-between;gap:12px;flex-wrap:wrap;margin:16px 0 12px}@media(max-width:580px){.savebar{flex-direction:column;align-items:stretch}.savebar #save{order:1}}.savebar span{font-size:13px;color:var(--secondary-text-color,#657a82)}.row.draft{background:#7c3aed14;border-left:3px solid #7c3aed;padding-left:10px;padding-right:10px}.draft-badge,.current-badge{display:inline-block;margin-top:6px;font-size:12px;font-weight:700}.draft-badge::before,.current-badge::before{content:"";display:inline-block;width:8px;height:8px;border-radius:50%;background:#7c3aed;margin-right:6px}
       .current-badge::before{background:#176e82}
+      .row.deleted{background:#b7443510;border-left:3px solid #b74435;padding-left:12px}.row.deleted time{color:#a63227;text-decoration:line-through}.deleted-badge{display:block;color:#a63227;font-size:12px;font-weight:700;margin-top:6px}.scroll.editing{max-height:620px}.history-editor.editing{border:2px solid #c65d00;border-radius:8px;padding:16px;margin:10px 0;background:var(--card-background-color,#fff)}.history-editor h3{grid-column:1/-1;font-size:15px;margin:0}.history-editor .actions{align-self:end}@media(max-width:580px){.history-editor .actions{grid-column:1/-1}}
       .template-tools{display:flex;gap:10px;align-items:center;flex-wrap:wrap;margin:16px 0}.template-tools span{font-size:13px}.row{position:relative;padding-left:32px}.row.draft{padding-left:32px}.row input.history-select{position:absolute;left:0;top:15px;width:22px;height:22px;min-height:22px;margin:0;padding:0;accent-color:#176e82}.row.draft input.history-select{left:4px}.template-hint{margin:0 0 12px}
       </style><main>${unlocked ? '<header><div><div class="eyebrow">Manual Location</div><h1>Pozycje i historia</h1><p class="sub">Jeden zapis, wspólny dla wszystkich kart mapy.</p></div><button id="lock">Zablokuj panel</button></header><div id="message" role="status" hidden></div>' : ""}
       ${!admin ? '<section class="box lockbox"><h2>Ustawienia</h2><p class="sub">Zaloguj się na konto administratora Home Assistant.</p><div id="message" role="status" hidden></div></section>' : !unlocked ? '<section class="box lockbox"><h2>Odblokuj ustawienia</h2><div id="message" role="status" hidden></div><form id="unlock-form"><div class="field" style="margin-top:22px"><label for="pin">PIN administratora (4–12 znaków: litery A–Z, a–z lub cyfry)</label><input id="pin" type="password" pattern="[A-Za-z0-9]{4,12}" minlength="4" maxlength="12" autocomplete="one-time-code" data-1p-ignore autocapitalize="none" autocorrect="off" spellcheck="false" required></div><button class="primary wide" type="submit">Odblokuj</button></form></section>' : `
       <div class="layout"><aside class="sidebar"><section class="box"><h2>Ustawienia map</h2><label class="toggle"><input type="checkbox" id="global-enabled"><span>Włącz ręczne lokalizacje<small>Wyłączenie przywraca dane HA</small></span></label><div class="field" style="margin-top:24px"><label for="person">Osoba</label><select id="person"></select></div><label class="toggle"><input type="checkbox" id="person-enabled"><span>Włącz dla tej osoby</span></label><p class="notice">Nowa osoba jest włączona po ustawieniu pierwszej pozycji i zapisaniu zmian.</p><p class="notice" id="missing-person-notice" hidden>Tej osoby nie ma już w Home Assistant. Usuń jej ustawienia poniżej, a następnie zapisz wszystkie zmiany. Pozostałe osoby zachowają swoje ustawienia.</p><button class="wide danger" id="remove-person">Usuń ustawienia tej osoby</button></section>
       <section class="box"><h2>Bieżąca pozycja</h2><p class="current-summary" id="current-summary"></p><div class="field"><button class="wide" id="use-device-location">Użyj lokalizacji tego urządzenia</button><p class="sub">Jednorazowy odczyt z telefonu lub komputera, na którym otwarto panel. Wymaga zgody na lokalizację; dokładność zależy od urządzenia.</p></div><div class="pair"><div class="field"><label for="current-lat">Szerokość</label><input id="current-lat" type="number" step="any" min="-90" max="90"></div><div class="field"><label for="current-lon">Długość</label><input id="current-lon" type="number" step="any" min="-180" max="180"></div></div><button class="wide" id="set-current">Ustaw bieżącą pozycję</button><p class="sub">Każde ustawienie dodaje osobny szkic z godziną. Przed zapisem możesz zmienić jego czas i współrzędne albo go usunąć.</p></section></aside>
-      <section><div class="box mapbox"><manual-location-place-search id="admin-place-search"></manual-location-place-search><div class="map" id="map" aria-label="Mapa wyboru pozycji"></div><div class="caption">Kliknij mapę, aby uzupełnić współrzędne. Następnie ustaw pozycję lub dodaj punkt historii.</div><div class="map-edit-tools" id="map-edit-tools" hidden><p id="map-edit-status" role="status"></p><div class="actions"><button class="primary" id="apply-map-edit" type="submit" form="history-form">Zastosuj edycję</button><button id="cancel-map-edit" type="button">Anuluj edycję</button></div></div></div><section class="box history"><div class="history-top"><h2>Historia</h2><span class="eyebrow" id="count"></span></div><p class="sub">Od najnowszych do najstarszych. Fioletowe pozycje czekają na zapis.</p><div class="savebar"><button class="primary" id="save">Zapisz wszystkie zmiany</button><span id="save-state"></span><button id="reload">Wczytaj zapisane dane</button></div><div class="template-tools"><span id="history-selection-count" role="status"></span><button id="history-template" type="button">Utwórz szablon trasy</button><button id="history-selection-clear" type="button">Wyczyść zaznaczenie</button></div><p class="sub template-hint" id="history-template-hint"></p><div class="scroll" id="history-list"></div><form id="history-form" class="history-editor"><div class="field"><label for="history-lat">Szerokość</label><input id="history-lat" type="number" step="any" min="-90" max="90" required></div><div class="field"><label for="history-lon">Długość</label><input id="history-lon" type="number" step="any" min="-180" max="180" required></div><div class="field timefield"><label for="history-time">Lokalna data i godzina</label><input id="history-time" type="datetime-local" step="1" required></div><button id="add-history" type="submit">Dodaj punkt</button></form><button id="cancel-edit" hidden>Anuluj edycję punktu</button></section></section></div>
+      <section><div class="box mapbox"><manual-location-place-search id="admin-place-search"></manual-location-place-search><div class="map" id="map" aria-label="Mapa wyboru pozycji"></div><div class="caption">Kliknij mapę, aby uzupełnić współrzędne. Następnie ustaw pozycję lub dodaj punkt historii.</div><div class="map-edit-tools" id="map-edit-tools" hidden><p id="map-edit-status" role="status"></p><div class="actions"><button class="primary" id="apply-map-edit" type="submit" form="history-form">Zastosuj edycję</button><button id="cancel-map-edit" type="button">Anuluj edycję</button></div></div></div><section class="box history"><div class="history-top"><h2>Historia</h2><span class="eyebrow" id="count"></span></div><p class="sub">Od najnowszych do najstarszych. Fioletowe pozycje czekają na zapis.</p><div class="savebar"><button class="primary" id="save">Zapisz wszystkie zmiany</button><span id="save-state"></span><button id="reload">Wczytaj zapisane dane</button></div><div class="template-tools"><span id="history-selection-count" role="status"></span><button id="history-template" type="button">Utwórz szablon trasy</button><button id="history-selection-clear" type="button">Wyczyść zaznaczenie</button></div><p class="sub template-hint" id="history-template-hint"></p><div class="scroll" id="history-list"></div><div id="history-editor-home"><form id="history-form" class="history-editor"><h3 id="history-edit-title" hidden>Edycja punktu</h3><div class="field"><label for="history-lat">Szerokość</label><input id="history-lat" type="number" step="any" min="-90" max="90" required></div><div class="field"><label for="history-lon">Długość</label><input id="history-lon" type="number" step="any" min="-180" max="180" required></div><div class="field timefield"><label for="history-time">Lokalna data i godzina</label><input id="history-time" type="datetime-local" step="1" required></div><div class="actions"><button id="add-history" type="submit">Dodaj punkt</button><button id="cancel-edit" type="button" hidden>Anuluj edycję punktu</button></div></form></div></section></section></div>
       <manual-location-scenarios></manual-location-scenarios>
       <details class="pin-change"><summary>Zmień PIN administratora</summary><form id="pin-form"><div class="field"><label for="new-pin">Nowy PIN (4–12 znaków: litery A–Z, a–z lub cyfry)</label><input id="new-pin" type="password" pattern="[A-Za-z0-9]{4,12}" minlength="4" maxlength="12" autocomplete="off" required></div><button type="submit">Zmień PIN i zablokuj sesje</button></form></details>`}</main>`;
     if (!admin) return;
@@ -479,15 +485,27 @@ export class ManualLocationAdmin extends HTMLElement {
     } catch (error) { this._message(error.message || errorText(error)); return false; }
   }
   _refreshHistory(focusPoint = null) {
-    const history = this._historyRows(), saved = new Set(this._savedHistoryPoints().map(templateKey));
-    const eligible = new Set(history.filter((row) => !row.draft && saved.has(templateKey(row.point))).map((row) => templateKey(row.point)));
+    const live = this._historyRows(), saved = new Set(this._savedHistoryPoints().map(templateKey));
+    const liveKeys = new Set(live.map((row) => deletedPointKey(row.point)));
+    const removed = (this._deletedHistory[this._selected] || []).filter((point) => !liveKeys.has(deletedPointKey(point)));
+    const history = [...live, ...removed.map((point) => ({ point, index: -1, deleted: true }))]
+      .sort((a, b) => Date.parse(b.point.timestamp) - Date.parse(a.point.timestamp));
+    const eligible = new Set(live.filter((row) => !row.draft && saved.has(templateKey(row.point))).map((row) => templateKey(row.point)));
     for (const key of this._historySelection) if (!eligible.has(key)) this._historySelection.delete(key);
     this._historyChecks = [];
-    this.shadowRoot.querySelector("#count").textContent = `${history.length} punktów`;
+    this.shadowRoot.querySelector("#count").textContent = `${live.length} punktów${removed.length ? ` · ${removed.length} do usunięcia` : ""}`;
     this.shadowRoot.querySelector("#add-history").textContent = this._editIndex < 0 ? "Dodaj punkt" : "Zastosuj edycję";
     this.shadowRoot.querySelector("#cancel-edit").hidden = this._editIndex < 0;
     const list = this.shadowRoot.querySelector("#history-list");
-    list.replaceChildren();
+    const form = this.shadowRoot.querySelector("#history-form"), home = this.shadowRoot.querySelector("#history-editor-home");
+    const editing = this._editIndex >= 0 && live.some((row) => row.index === this._editIndex);
+    if (editing) {
+      if (form.parentElement !== list) list.append(form);
+      for (const child of [...list.children]) if (child !== form) child.remove();
+    } else { if (form.parentElement !== home) home.append(form); list.replaceChildren(); }
+    list.classList.toggle("editing", editing);
+    form.classList.toggle("editing", editing);
+    this.shadowRoot.querySelector("#history-edit-title").hidden = !editing;
     if (!history.length) {
       const empty = document.createElement("div");
       empty.className = "empty";
@@ -497,9 +515,10 @@ export class ManualLocationAdmin extends HTMLElement {
     this._previewEdit();
     this._saveState();
     const entityId = this._selected, generation = this._historySelectionGeneration;
-    history.forEach(({ point, index, draft, current }) => {
+    let afterEditor = false;
+    history.forEach(({ point, index, draft, current, deleted }) => {
       const row = document.createElement("div");
-      row.className = draft ? "row draft" : "row";
+      row.className = deleted ? "row deleted" : draft ? "row draft" : "row";
       const info = document.createElement("div");
       const time = document.createElement("time");
       time.dateTime = point.timestamp;
@@ -507,6 +526,12 @@ export class ManualLocationAdmin extends HTMLElement {
       const coords = document.createElement("small");
       coords.textContent = `${point.latitude.toFixed(5)}, ${point.longitude.toFixed(5)}`;
       info.append(time, coords);
+      if (deleted) {
+        const badge = document.createElement("span"); badge.className = "deleted-badge";
+        badge.textContent = "Do usunięcia po zapisie"; info.append(badge); row.append(info);
+        if (editing && !afterEditor) list.insertBefore(row, form); else list.append(row);
+        return;
+      }
       if (draft || current) {
         const badge = document.createElement("span");
         badge.className = draft ? "draft-badge" : "current-badge";
@@ -527,7 +552,8 @@ export class ManualLocationAdmin extends HTMLElement {
         this.shadowRoot.querySelector("#history-time").value = localDateInput(point.timestamp);
         this._refreshHistory();
         this._previewEdit(true);
-        this.shadowRoot.querySelector("#map").scrollIntoView?.({ block: "center", behavior: "smooth" });
+        form.scrollIntoView?.({ block: "center", behavior: "smooth" });
+        this.shadowRoot.querySelector("#history-time").focus?.({ preventScroll: true });
       });
       const remove = document.createElement("button");
       remove.disabled = !this._hass.states[this._selected];
@@ -549,10 +575,18 @@ export class ManualLocationAdmin extends HTMLElement {
         this._syncHistorySelection();
       });
       this._historyChecks.push({ input: select, key, saved: eligible.has(key) });
-      actions.append(remove); row.append(info, actions, select); list.append(row);
+      actions.append(remove); row.append(info, actions, select);
+      if (editing && !afterEditor) list.insertBefore(row, form); else list.append(row);
+      if (editing && index === this._editIndex) afterEditor = true;
       if (point === focusPoint) list.scrollTop = row.offsetTop;
     });
     this._syncHistorySelection();
+  }
+  _recordDeletedPoints(entityId, points) {
+    const deleted = this._deletedHistory[entityId] ||= [];
+    for (const point of points) if (!deleted.some((entry) => deletedPointKey(entry) === deletedPointKey(point))) {
+      deleted.push({ latitude: point.latitude, longitude: point.longitude, timestamp: point.timestamp });
+    }
   }
   _removePoint(entityId, key) {
     if (entityId !== this._selected || this._busy || this._scenarios?.busy || !this._token
@@ -571,6 +605,7 @@ export class ManualLocationAdmin extends HTMLElement {
     // Confirm before changing either points or local undo metadata.
     if (row.current && !next) { this._removePerson(); return; }
     this._cancelLocation();
+    this._recordDeletedPoints(entityId, [row.point]);
     person.history = remaining; this._currentDrafts[entityId] = remainingTimes;
     if (removingBaseline) this._removedCurrent[entityId] = key;
     if (row.current && !undoDraft) {
@@ -682,6 +717,7 @@ export class ManualLocationAdmin extends HTMLElement {
   _removePerson() {
     if (this._busy || !this._person()) return;
     if (!window.confirm("Usunąć ręczną pozycję i całą historię tej osoby? Po zapisaniu wszystkich zmian karty wrócą do danych HA, jeśli osoba nadal istnieje.")) return;
+    this._recordDeletedPoints(this._selected, this._historyRows().map((row) => row.point));
     const saved = this._savedSnapshot?.persons[this._selected];
     if (saved) this._removedCurrent[this._selected] = historyKey(saved.current);
     delete this._snapshot.persons[this._selected];
@@ -689,7 +725,7 @@ export class ManualLocationAdmin extends HTMLElement {
     this._editIndex = -1;
     this._changed();
     this._render();
-    this._message("Ustawienia osoby usunięto z formularza. Zapisz wszystkie zmiany, aby potwierdzić usunięcie.", true);
+    this._message("Ustawienia osoby oznaczono do usunięcia. Zapisz wszystkie zmiany, aby potwierdzić usunięcie.", true);
   }
 
   async _unlock() {
@@ -713,6 +749,7 @@ export class ManualLocationAdmin extends HTMLElement {
       if (restoreParent) {
         this._snapshot = retained.snapshot; this._savedSnapshot = retained.saved;
         this._currentDrafts = retained.currentDrafts; this._removedCurrent = retained.removedCurrent || {};
+        this._deletedHistory = retained.deletedHistory || {};
         this._dirty = retained.dirty; this._editing = retained.editing; this._editIndex = retained.editIndex;
       } else { this._dirty = false; this._editing = false; this._editIndex = -1; }
       this._retained = null;
@@ -752,6 +789,7 @@ export class ManualLocationAdmin extends HTMLElement {
     this._savedSnapshot = structuredClone(result.data);
     this._currentDrafts = {};
     this._removedCurrent = {};
+    this._deletedHistory = {};
     this._dirty = false;
     this._editing = false;
     this._editIndex = -1;
@@ -766,6 +804,7 @@ export class ManualLocationAdmin extends HTMLElement {
     this._savedSnapshot = structuredClone(result.data);
     this._currentDrafts = {};
     this._removedCurrent = {};
+    this._deletedHistory = {};
     this._scenarioDrafts = {};
     this._scenarioView = { selectedByEntity: {}, personFilter: "", statusFilter: "", nextLocal: 0 };
     this._dirty = false; this._editing = false; this._editIndex = -1;

@@ -94,6 +94,12 @@ Integracja stosuje wspólny trwały budżet **2500 jednostek na dzień UTC** i l
 
 ## Scenariusz trasy na dzień
 
+### Edycja godziny i oznaczanie usunięć
+
+Kliknij **Edytuj** przy punkcie Historii lub planu. Formularz otworzy się bezpośrednio pod nim: zmienisz współrzędne oraz datę i godzinę w Historii lub godzinę w planie, także z sekundami. **Zastosuj edycję** przygotowuje zmianę lokalnie; dopiero **Zapisz wszystkie zmiany** lub **Zapisz plan** zatwierdza ją w HA. **Anuluj** odrzuca niezastosowany formularz. Zmiana samych współrzędnych zachowuje oryginalny czas i ułamki sekundy. Historia używa czasu urządzenia, a plan strefy HA wskazanej w edytorze.
+
+Po kliknięciu kosza punkt pozostaje na liście na czerwono z opisem **Do usunięcia po zapisie**. Znika dopiero po udanym zapisie. Błąd zapisu zachowuje oznaczenie; **Wczytaj zapisane dane** lub **Odrzuć szkic planu** przywraca zapisany stan. Czerwone punkty są wyłącznie podglądem usunięć: nie są edytowalne ani wybieralne do szablonu i nie są częścią mapy lub wykonywanej trasy. Dotyczy to również nowych, jeszcze niezapisanych punktów. Wykonane punkty trasy pozostają chronione.
+
 ### Szablon z punktów historii
 
 W sekcji **Historia** zaznacz checkboxami zapisane punkty jednej osoby z jednego dnia i kliknij **Utwórz szablon trasy**. W bibliotece otworzy się niezależny szkic **Szablon z historii**: punkty będą od najstarszego do najnowszego, z oryginalnymi godzinami i sekundami. Historia źródłowa pozostaje bez zmian; fioletowe niezapisane punkty trzeba najpierw zapisać. Zmień **Dzień trasy** i godzinę początku w **Czas trasy**, dostosuj punkty, następnie wybierz **Zapisz plan** i osobno **Start**. Limit to500 punktów z jednego dnia według strefy HA; błędny wybór pozostaje zaznaczony, a częściowy szablon nie powstaje.
