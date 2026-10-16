@@ -1,7 +1,7 @@
-import { callWS, coordinates, errorText } from "./data.js?v=0.1.17";
-import { L, makeMap, mapStyles, setMapHass } from "./map-common.js?v=0.1.17";
-import "./place-search.js?v=0.1.17";
-import "./route-import.js?v=0.1.17";
+import { callWS, coordinates, errorText } from "./data.js?v=0.1.18";
+import { L, makeMap, mapStyles, setMapHass } from "./map-common.js?v=0.1.18";
+import "./place-search.js?v=0.1.18";
+import "./route-import.js?v=0.1.18";
 
 const STATUS = { draft: "Przygotowany", running: "Uruchomiony", stopped: "Zatrzymany", completed: "Ukończony" };
 const REASON = { global_disabled: "Wyłączono ręczne lokalizacje.", person_missing: "Tej osoby nie ma w HA.",
@@ -167,7 +167,7 @@ export class ManualLocationScenarios extends HTMLElement {
   _importRoute(dto, { day, startTime }) {
     const state = this._state();
     if (this._busy || state.busy || !state.token || !state.hass.user?.is_admin || state.hass.connected === false
-      || !state.hass.states[this._selected]) throw new Error("Odblokuj panel i wybierz osobę przed importem.");
+      || !state.hass.states[this._selected]) throw new Error("Odblokuj panel i wybierz osobę przed wyznaczeniem trasy.");
     const start = Date.parse(scenarioUTC(day, startTime, this._zone()));
     const points = dto.points.map((point) => {
       const timestamp = new Date(start + point.offset_seconds * 1000).toISOString();
@@ -178,10 +178,10 @@ export class ManualLocationScenarios extends HTMLElement {
     });
     this._cancelLocation();
     const id = this._newDraft(this._selected, true), draft = this._context.drafts[id];
-    draft.day = day; draft.plan.day = day; draft.plan.name = "Trasa z Google Maps"; draft.plan.points = points;
+    draft.day = day; draft.plan.day = day; draft.plan.name = "Wyznaczona trasa"; draft.plan.points = points;
     this._view.personFilter = ""; this._view.statusFilter = ""; this._view.selectedByEntity[this._selected] = id;
     this.context = this._context; this._notify(); this._refresh(true);
-    this._message("Import utworzył nowy szkic. Sprawdź trasę, nazwę i godziny. Zapisz plan zachowa go w HA; Start uruchamia osobno.", true);
+    this._message("Utworzono nowy szkic trasy. Sprawdź trasę, nazwę i godziny. Zapisz plan zachowa go w HA; Start uruchamia osobno.", true);
   }
   _choosePlace(point) {
     if (!this._canLocate()) return false;

@@ -50,6 +50,9 @@ async def async_handle_command(hass, connection, msg):
             fields.discard("scenarios")
         if operation in {"scenario_save", "scenario_action"} and "scenario_id" not in fields:
             raise LocationError("client_outdated")
+        # Older clients omit the optional upper bound and keep fixed intervals.
+        if operation == "route_import":
+            fields.discard("interval_max_minutes")
         if fields != FIELDS[operation]:
             raise LocationError("invalid_input")
         if operation == "version":
@@ -79,7 +82,8 @@ async def async_handle_command(hass, connection, msg):
                     result = await importer.async_resolve(msg["url"], authorize=authorize)
                 else:
                     result = await importer.async_import(
-                        msg["points"], msg["mode"], msg["interval_minutes"], msg["duration_minutes"], authorize=authorize,
+                        msg["points"], msg["mode"], msg["interval_minutes"], msg["duration_minutes"],
+                        interval_max_minutes=msg.get("interval_max_minutes"), authorize=authorize,
                     )
             finally:
                 authorize()

@@ -4,6 +4,7 @@ import asyncio
 from bisect import bisect_right
 import json
 import math
+from random import randint
 import re
 import unicodedata
 from urllib.parse import parse_qs, unquote, unquote_plus, urljoin, urlsplit
@@ -137,7 +138,7 @@ def _distance(first, second):
     return 6371000 * 2 * math.asin(min(1, math.sqrt(a)))
 
 
-def sample_route(payload, interval_seconds, duration_seconds, expected_legs=None):
+def sample_route(payload, interval_seconds, duration_seconds, expected_legs=None, *, interval_max_seconds=None):
     """Interpolate within each timed step, retaining slower/faster route parts."""
     try:
         if not isinstance(payload, dict) or payload.get("type") != "FeatureCollection" or len(payload["features"]) != 1:
@@ -201,11 +202,21 @@ def sample_route(payload, interval_seconds, duration_seconds, expected_legs=None
         if abs(elapsed - provider_time) > max(5, provider_time * 0.05):
             raise ValueError
         duration = provider_time if duration_seconds is None else duration_seconds
-        if not _number(duration, 1, 86400):
+        if not _number(duration, 0.001 if interval_max_seconds is not None else 1, 86400):
             raise LocationError("route_duration_invalid")
-        offsets = list(range(0, math.ceil(duration), interval_seconds))
-        if offsets[-1] != duration:
-            offsets.append(duration)
+        if interval_max_seconds is not None:
+            duration = max(1, round(duration))
+        offsets = [0]
+        while True:
+            step = interval_seconds if interval_max_seconds is None else randint(interval_seconds, interval_max_seconds)
+            offset = offsets[-1] + step
+            if offset >= duration:
+                break
+            offsets.append(offset)
+            # Reserve one slot for the exact destination, even with random steps.
+            if len(offsets) >= MAX_POINTS:
+                raise LocationError("route_too_many_points")
+        offsets.append(duration)
         if len(offsets) > MAX_POINTS:
             raise LocationError("route_too_many_points")
         ends = [item[1] for item in segments]
@@ -301,7 +312,7 @@ class RouteImporter:
         except Exception:
             raise LocationError("route_unavailable") from None
 
-    async def async_import(self, points, mode, interval_minutes, duration_minutes, *, authorize=None):
+    async def async_import(self, points, mode, interval_minutes, duration_minutes, *, interval_max_minutes=None, authorize=None):
         options = self.geocoder.entry.options
         self._check(options, authorize)
         if not isinstance(points, list) or not 2 <= len(points) <= MAX_STOPS or not isinstance(mode, str) or mode not in MODES:
@@ -313,9 +324,13 @@ class RouteImporter:
             validated.append(_coordinates(point["latitude"], point["longitude"]))
         if type(interval_minutes) is not int or not 1 <= interval_minutes <= 1440:
             raise LocationError("invalid_input")
+        if interval_max_minutes is not None and (type(interval_max_minutes) is not int
+                or not interval_minutes <= interval_max_minutes <= 1440):
+            raise LocationError("invalid_input")
         if duration_minutes is not None and not _number(duration_minutes, 1 / 60, 1440):
             raise LocationError("route_duration_invalid")
-        if duration_minutes is not None and math.ceil(duration_minutes / interval_minutes) + 1 > MAX_POINTS:
+        longest_interval = interval_minutes if interval_max_minutes is None else interval_max_minutes
+        if duration_minutes is not None and math.ceil(duration_minutes / longest_interval) + 1 > MAX_POINTS:
             raise LocationError("route_too_many_points")
         key = options.get(API_KEY_OPTION)
         if not key:
@@ -332,6 +347,7 @@ class RouteImporter:
                 sampled, duration, distance = sample_route(
                     payload, interval_minutes * 60, None if duration_minutes is None else duration_minutes * 60,
                     len(validated) - 1,
+                    interval_max_seconds=None if interval_max_minutes is None else interval_max_minutes * 60,
                 )
                 budget = await self.geocoder.async_settle_route(
                     day, route_cost(len(validated), distance), options, authorize=authorize,

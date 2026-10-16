@@ -120,13 +120,17 @@ Kliknij **Edytuj** przy zapisanym punkcie lub szkicu: mapa pokaże wyróżniony 
 
 Przy mapie kliknij **Zastosuj edycję**, aby przygotować zmianę, albo **Anuluj edycję**, aby ją odrzucić. Dane zostaną utrwalone po **Zapisz wszystkie zmiany**; podczas trwającej edycji należy ją najpierw zastosować albo anulować. Inne przygotowane szkice pozostają w formularzu.
 
-## Import linku i zmiana czasu trasy
+## Wyznaczanie, import i zmiana czasu trasy
 
-W **Plany i szkice → Importuj trasę z linku Google Maps** wklej link (także `maps.app.goo.gl`) i kliknij **Odczytaj link**. Sprawdź początek, cel i przystanki. Jeśli link zawiera samą nazwę bez współrzędnych, wybierz dokładny wynik w wyszukiwarce. Wybierz pieszo, samochód, rower albo komunikację publiczną; tryb rozpoznany z linku możesz zmienić.
+W **Plany i szkice → Wyznacz lub importuj trasę** wybierz **Wyznacz we wtyczce**. Wyszukaj początek i cel, a następnie jawnie wybierz właściwe miejsca z wyników. Wybrane miejsce możesz zmienić przed wyznaczeniem. Google Maps nie jest wymagane.
 
-Ustaw dzień, godzinę początku oraz odstęp punktów (domyślnie **15 minut**). W polu **Czas podróży z Google (min)** możesz podać całkowity czas widoczny w Google Maps, np. 70 minut. To ręcznie wpisana wartość; integracja nie odczytuje czasu ze strony Google i nie wymaga Google Cloud. Puste pole korzysta z czasu Geoapify. Przyciskiem **Wyznacz trasę i utwórz szkic** otrzymasz osobny lokalny plan, z początkiem, punktami co wybrany odstęp i dokładnym końcem. Sprawdź podgląd, nazwę i godziny, następnie **Zapisz plan**; **Start** uruchamia go osobno.
+Alternatywnie wybierz **Link Google Maps**, wklej link (także maps.app.goo.gl) i kliknij **Odczytaj link**. Sprawdź początek, cel i przystanki; przy samych nazwach wybierz dokładne wyniki. W obu trybach wybierz transport: pieszo, samochód, rower albo komunikację publiczną.
 
-Geoapify wyznacza drogę i orientacyjne pozycje na niej; droga może różnić się od wariantu Google. Wpisany łączny czas proporcjonalnie skaluje szacowane czasy etapów. Komunikacja publiczna używa przybliżonych tras `approximated_transit`, bez gwarancji konkretnego pociągu/autobusu, rozkładu i czasów przesiadek. Brak obsługi połączenia zgłasza błąd zamiast zastępować je samochodem. Link jest odczytywany dopiero po kliknięciu, a współrzędne zatwierdzonych miejsc trafiają do Geoapify dopiero przy wyznaczaniu. Maksymalnie 12 miejsc i 500 punktów; trasa musi zmieścić się w jednym dniu HA.
+Ustaw dzień i godzinę początku, także z sekundami. Domyślnie punkty powstają w **losowym przedziale 9–15 minut**. Możesz zmienić minimum i maksimum albo wybrać dotychczasowy stały odstęp. Losowana jest liczba pełnych sekund pomiędzy granicami, np. 9 min 37 s, a nie tylko całe minuty. Początek i koniec są zachowane; ostatni odcinek może być krótszy niż minimum. Losowanie odbywa się raz podczas wyznaczania: zapis, edycja, zmiana dnia i przesunięcie czasu zachowują uzyskane godziny oraz sekundy.
+
+Pole **Własny czas podróży (min)** jest opcjonalne. Możesz podać np. 70 minut odczytanych z Google; to ręczny wpis, bez odczytu czasu ze strony Google i bez Google Cloud. Puste pole korzysta z szacunku Geoapify dla wybranego transportu. Wpisany czas proporcjonalnie skaluje etapy. W losowym trybie czas jest zaokrąglany do pełnej sekundy. **Wyznacz trasę i utwórz szkic** tworzy osobny lokalny plan. Sprawdź podgląd, nazwę i godziny, następnie **Zapisz plan**; **Start** uruchamia go osobno.
+
+Geoapify wyznacza drogę i orientacyjne pozycje na niej; przebieg może różnić się od wariantu Google. Komunikacja publiczna jest przybliżeniem, bez gwarancji konkretnego pociągu/autobusu, rozkładu i czasów przesiadek. Brak obsługi połączenia zgłasza błąd zamiast zastępować je samochodem. Wyszukiwanie wysyła nazwę dopiero po kliknięciu Szukaj; routing wysyła zatwierdzone współrzędne po kliknięciu wyznaczania. Oba korzystają z obecnego wspólnego limitu Geoapify. Maksymalnie 12 miejsc i 500 punktów; trasa musi zmieścić się w jednym dniu HA.
 
 **Czas trasy** pozwala ustawić godzinę pierwszego oczekującego punktu, przesuwając wszystkie dalsze o tę samą różnicę. Przy wybranym punkcie kliknij **Przesuń odtąd** i podaj przesunięcie w minutach (np. +40 na przerwę, −15 na wcześniejszy wyjazd) albo jego nową godzinę. Zastosowanie zmienia szkic; **Zapisz plan** zatwierdza go w HA.
 
