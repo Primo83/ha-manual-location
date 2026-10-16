@@ -26,7 +26,7 @@ class FrontendView(HomeAssistantView):
     name = f"{DOMAIN}:frontend"
     requires_auth = False
     files = frozenset({
-        "admin.js", "data.js", "map-common.js", "map.js", "updates.js", "scenarios.js", "place-search.js",
+        "admin.js", "data.js", "map-common.js", "map.js", "updates.js", "scenarios.js", "place-search.js", "route-import.js",
         "vendor/leaflet.js", "vendor/leaflet.css",
         "vendor/images/layers-2x.png", "vendor/images/layers.png",
         "vendor/images/marker-icon-2x.png", "vendor/images/marker-icon.png",

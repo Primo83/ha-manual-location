@@ -408,8 +408,6 @@ class ManualLocation:
                 raise LocationError("scenario_missing")
             if previous and previous["entity_id"] != entity_id:
                 raise LocationError("invalid_input")
-            if previous and previous["status"] == "running" and scenario_id not in self._suspended:
-                raise LocationError("scenario_running")
             if previous is None and len(self.data["scenarios"]) >= MAX_SCENARIOS:
                 raise LocationError("scenario_limit")
             cursor = previous["cursor"] if previous else 0
@@ -432,6 +430,14 @@ class ManualLocation:
                 "entity_id": entity_id, "day": day, "name": name.strip(), "points": normalized,
                 "status": status, "cursor": cursor, "reason": reason,
             }
+            if status == "running":
+                if cursor == len(normalized):
+                    raise LocationError("no_pending_points")
+                now = datetime.now(UTC)
+                if any(timestamp(point["timestamp"]) <= now for point in normalized[cursor:]):
+                    raise LocationError("pending_in_past")
+                if problem := self._scenario_problem(snapshot, entity_id, snapshot["scenarios"][scenario_id]):
+                    raise LocationError(problem)
             await self._commit(snapshot)
             self._reschedule()
             return self._snapshot()

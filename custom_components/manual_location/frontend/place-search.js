@@ -1,4 +1,4 @@
-import { callWS, coordinates, errorText } from "./data.js?v=0.1.16";
+import { callWS, coordinates, errorText } from "./data.js?v=0.1.17";
 
 const TYPES = { amenity: "Obiekt / miejsce", building: "Adres / budynek", street: "Ulica", suburb: "Dzielnica",
   district: "Dzielnica", postcode: "Kod pocztowy", city: "Miejscowość", county: "Powiat", state: "Region", country: "Kraj" };
@@ -77,7 +77,7 @@ export class ManualLocationPlaceSearch extends HTMLElement {
         button.append(label, detail); button.addEventListener("click", () => this._select(index, request)); row.append(button); list.append(row);
       });
       this.shadowRoot.querySelector("#place-extra-attribution").textContent = [...new Set(this._results.map((result) => result.attribution).filter(Boolean))].join(" · ");
-      this._message(`${this._results.length ? "Wybierz miejsce z listy." : "Nie znaleziono miejsca. Doprecyzuj adres lub wybierz punkt na mapie."} Pozostało ${response.remaining} z ${response.limit} zapytań integracji (${response.day}, UTC).`);
+      this._message(`${this._results.length ? "Wybierz miejsce z listy." : "Nie znaleziono miejsca. Doprecyzuj adres lub wybierz punkt na mapie."} Pozostało ${response.remaining} z ${response.limit} jednostek wspólnego limitu integracji (${response.day}, UTC).`);
     } catch (error) {
       if (this._pending !== request) return;
       if (!this._matches(request)) { this.cancel(); return; }

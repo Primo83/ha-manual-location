@@ -18,6 +18,8 @@ FIELDS = {
     "unlock": {"pin"},
     "admin_get": {"token"},
     "geocode": {"token", "query"},
+    "route_resolve": {"token", "url"},
+    "route_import": {"token", "points", "mode", "interval_minutes", "duration_minutes"},
     "admin_save": {"token", "revision", "enabled", "persons"},
     "scenario_save": {"token", "revision", "scenario_id", "entity_id", "day", "name", "points"},
     "scenario_action": {"token", "revision", "scenario_id", "action"},
@@ -66,6 +68,21 @@ async def async_handle_command(hass, connection, msg):
                 )
             finally:
                 coordinator.require_session(connection, msg["token"])
+        elif operation in {"route_resolve", "route_import"}:
+            from .routing import RouteImporter
+
+            coordinator.require_session(connection, msg["token"])
+            importer = RouteImporter(coordinator.geocoder)
+            authorize = lambda: coordinator.require_session(connection, msg["token"])
+            try:
+                if operation == "route_resolve":
+                    result = await importer.async_resolve(msg["url"], authorize=authorize)
+                else:
+                    result = await importer.async_import(
+                        msg["points"], msg["mode"], msg["interval_minutes"], msg["duration_minutes"], authorize=authorize,
+                    )
+            finally:
+                authorize()
         elif operation == "admin_save":
             result = await coordinator.async_save(connection, msg["token"], msg["revision"], msg["enabled"], msg["persons"])
         elif operation == "scenario_save":

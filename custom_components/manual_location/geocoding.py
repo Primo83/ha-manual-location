@@ -129,8 +129,8 @@ class PlaceGeocoder:
     def _remaining(self, day):
         return DAILY_LIMIT - (self._usage["count"] if self._usage["day"] == day else 0)
 
-    async def _reserve(self, day):
-        count = DAILY_LIMIT - self._remaining(day) + 1
+    async def _reserve(self, day, units=1):
+        count = DAILY_LIMIT - self._remaining(day) + units
         usage = {"day": day, "count": count}
         try:
             await self.store.async_save(usage)
@@ -141,9 +141,57 @@ class PlaceGeocoder:
                 self.hass.config_entries.async_update_entry(
                     self.entry, data={**self.entry.data, USAGE_INITIALIZED: True},
                 )
+        except asyncio.CancelledError:
+            self._storage_failed = True
+            raise
         except Exception:
             self._storage_failed = True
             raise LocationError("geocoder_storage_error") from None
+
+    async def async_reserve_route(self, options, *, authorize=None):
+        """Persist the conservative routing reservation in the search budget."""
+        async with self._lock:
+            self._check_options(options)
+            await self._load_usage()
+            self._check_options(options)
+            if authorize is not None:
+                authorize()
+            day = datetime.now(UTC).date().isoformat()
+            if self._remaining(day) < 100:
+                raise LocationError("geocoder_daily_limit")
+            if time.monotonic() - self._last_request < 1:
+                raise LocationError("geocoder_rate_limited")
+            await self._reserve(day, 100)
+            self._check_options(options)
+            if authorize is not None:
+                authorize()
+            self._last_request = time.monotonic()
+            return day
+
+    async def async_settle_route(self, day, cost, options, *, authorize=None):
+        """Release confirmed excess units, without refunding a newer UTC day."""
+        async with self._lock:
+            self._check_options(options)
+            await self._load_usage()
+            self._check_options(options)
+            if authorize is not None:
+                authorize()
+            adjustment = cost - 100
+            # A request reserved yesterday must never refund today's searches.
+            if self._usage["day"] != day:
+                day = datetime.now(UTC).date().isoformat()
+                adjustment = max(0, adjustment)
+            remaining = self._remaining(day)
+            exhausted = adjustment > remaining
+            if adjustment:
+                await self._reserve(day, min(adjustment, remaining))
+                self._check_options(options)
+                if authorize is not None:
+                    authorize()
+            if exhausted:
+                raise LocationError("geocoder_daily_limit")
+            today = datetime.now(UTC).date().isoformat()
+            return {"remaining": self._remaining(today), "limit": DAILY_LIMIT, "day": today}
 
     async def _request(self, query, key):
         try:
