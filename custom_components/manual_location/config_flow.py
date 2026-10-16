@@ -62,7 +62,9 @@ class ManualLocationOptionsFlow(OptionsFlow):
         return self.async_show_form(
             step_id="init",
             data_schema=vol.Schema({
-                vol.Optional(API_KEY_OPTION): TextSelector(TextSelectorConfig(type=TextSelectorType.PASSWORD)),
+                vol.Optional(API_KEY_OPTION): TextSelector(
+                    TextSelectorConfig(type=TextSelectorType.PASSWORD, autocomplete="one-time-code")
+                ),
                 vol.Optional("remove_api_key", default=False): bool,
             }),
             errors=errors,
