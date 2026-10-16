@@ -1,7 +1,7 @@
-import { callWS, coordinates, errorText } from "./data.js?v=0.1.18";
-import { L, makeMap, mapStyles, setMapHass } from "./map-common.js?v=0.1.18";
-import "./place-search.js?v=0.1.18";
-import "./route-import.js?v=0.1.18";
+import { callWS, coordinates, errorText } from "./data.js?v=0.1.19";
+import { L, makeMap, mapStyles, setMapHass } from "./map-common.js?v=0.1.19";
+import "./place-search.js?v=0.1.19";
+import "./route-import.js?v=0.1.19";
 
 const STATUS = { draft: "Przygotowany", running: "Uruchomiony", stopped: "Zatrzymany", completed: "Ukończony" };
 const REASON = { global_disabled: "Wyłączono ręczne lokalizacje.", person_missing: "Tej osoby nie ma w HA.",
@@ -100,6 +100,40 @@ export class ManualLocationScenarios extends HTMLElement {
     this.context = this._context; this._notify();
     this._message("Nowy szkic przygotowany. Zapisz plan, aby zachować go w HA także po odświeżeniu.", true);
     this.shadowRoot.querySelector("#scenario-name").focus?.();
+  }
+  createHistoryTemplate(entityId, points) {
+    if (!this._context) return false;
+    const state = this._state();
+    if (this.busy || state.busy || state.parentDirty || !this.isConnected || !state.token || !state.hass.user?.is_admin
+      || state.hass.connected === false || typeof entityId !== "string" || !entityId.startsWith("person.")
+      || entityId !== this._selected || entityId !== state.entityId || !state.hass.states[entityId]) return false;
+    if (!Array.isArray(points) || !points.length || points.length > 500) throw new Error("Wybierz od 1 do 500 zapisanych punktów historii.");
+    const seen = new Set(), days = new Set();
+    const copied = points.map((point) => {
+      const position = coordinates(point), timestamp = point?.timestamp;
+      if (Array.isArray(point) || !position || typeof timestamp !== "string"
+        || !/^\d{4}-\d\d-\d\dT(?:[01]\d|2[0-3]):[0-5]\d:[0-5]\d(?:\.\d+)?(?:Z|[+-](?:[01]\d|2[0-3]):[0-5]\d)$/.test(timestamp)) throw new Error("Wybrane punkty muszą mieć poprawne współrzędne i datę z jawną strefą czasową.");
+      const instant = Date.parse(timestamp), calendarDay = timestamp.slice(0, 10);
+      if (!Number.isFinite(instant) || calendarDay.startsWith("0000")
+        || new Date(calendarDay + "T00:00:00Z").toISOString().slice(0, 10) !== calendarDay) throw new Error("Wybrany punkt ma niepoprawną datę lub godzinę.");
+      if (seen.has(instant)) throw new Error("Wybrane punkty mają tę samą godzinę z dokładnością do milisekundy. Wybierz jeden z nich; punkty nie zostały połączone.");
+      seen.add(instant);
+      const localDay = scenarioLocal(timestamp, this._zone()).slice(0, 10);
+      if (!/^\d{4}-\d\d-\d\d$/.test(localDay) || localDay.startsWith("0000")) throw new Error("Wybrany punkt wykracza poza obsługiwany zakres dat.");
+      days.add(localDay);
+      return { latitude: position.latitude, longitude: position.longitude, timestamp };
+    }).sort((first, second) => Date.parse(first.timestamp) - Date.parse(second.timestamp));
+    if (days.size !== 1) throw new Error("Zaznaczone punkty obejmują kilka dni w strefie Home Assistanta. Wybierz punkty z jednego dnia, aby utworzyć szablon trasy.");
+    const day = [...days][0];
+    this._cancelLocation();
+    const id = this._newDraft(entityId, true), draft = this._context.drafts[id];
+    draft.day = day;
+    draft.plan = { entity_id: entityId, day, name: "Szablon z historii", points: copied, status: "draft", cursor: 0, reason: "" };
+    this._view.personFilter = ""; this._view.statusFilter = ""; this._view.selectedByEntity[entityId] = id;
+    this.context = this._context; this._notify(); this._refresh(true);
+    this._message("Utworzono niezależny szkic „Szablon z historii”. Dostosuj dzień i godziny przed ponownym użyciem, aby uniknąć kolizji z historią. Zapisz plan i Start pozostają osobnymi krokami.", true);
+    this.shadowRoot.querySelector("#scenario-day").focus?.();
+    return true;
   }
   _openPlan(id) {
     if (this._busy || this._state().busy) return;

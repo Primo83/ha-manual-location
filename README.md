@@ -94,6 +94,10 @@ Integracja stosuje wspólny trwały budżet **2500 jednostek na dzień UTC** i l
 
 ## Scenariusz trasy na dzień
 
+### Szablon z punktów historii
+
+W sekcji **Historia** zaznacz checkboxami zapisane punkty jednej osoby z jednego dnia i kliknij **Utwórz szablon trasy**. W bibliotece otworzy się niezależny szkic **Szablon z historii**: punkty będą od najstarszego do najnowszego, z oryginalnymi godzinami i sekundami. Historia źródłowa pozostaje bez zmian; fioletowe niezapisane punkty trzeba najpierw zapisać. Zmień **Dzień trasy** i godzinę początku w **Czas trasy**, dostosuj punkty, następnie wybierz **Zapisz plan** i osobno **Start**. Limit to500 punktów z jednego dnia według strefy HA; błędny wybór pozostaje zaznaczony, a częściowy szablon nie powstaje.
+
 Przy planie w **Bibliotece tras** kliknij **Duplikuj**, aby użyć go jako szablonu — także gdy jest już ukończony. Otworzy się niezależny szkic z dopiskiem „(kopia)”, ze wszystkimi zastosowanymi punktami i godzinami, bez postępu wykonania. Zmień **Dzień trasy**, dostosuj punkty i kliknij **Zapisz plan**. Godziny pozostają zgodne ze strefą HA; data ze zmianą czasu może wymagać wybrania innej, jednoznacznej godziny. Oryginał pozostaje zachowany. Kopia zacznie wykonanie dopiero po osobnym **Start**; niezastosowany formularz punktu źródłowego pozostaje w źródle.
 
 Na mapie edytora trasy celownik **Użyj lokalizacji tego urządzenia** jednorazowo pobiera pozycję telefonu lub komputera z otwartym panelem. Po zgodzie przeglądarki pokazuje punkt i obszar dokładności oraz uzupełnia współrzędne lokalnego edytora. Dzień i godzina pozostają zachowane; punkt dodajesz lub zatwierdzasz osobno, a plan zapisujesz przez **Zapisz plan**.
