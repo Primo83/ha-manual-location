@@ -1,7 +1,7 @@
-import { adminPersonOptions, callWS, editHistory, errorText, localDateInput, readPoint, removeHistory } from "./data.js?v=0.1.11";
-import { L, makeMap, mapStyles, popup } from "./map-common.js?v=0.1.11";
-import { registerReloadBlocker, startUpdateCheck } from "./updates.js?v=0.1.11";
-import "./scenarios.js?v=0.1.11";
+import { adminPersonOptions, callWS, editHistory, errorText, localDateInput, readPoint, removeHistory } from "./data.js?v=0.1.12";
+import { L, makeMap, mapStyles, popup } from "./map-common.js?v=0.1.12";
+import { registerReloadBlocker, startUpdateCheck } from "./updates.js?v=0.1.12";
+import "./scenarios.js?v=0.1.12";
 
 const DRAFT_COLOR = "#7c3aed";
 const EDIT_COLOR = "#c65d00";

@@ -82,6 +82,12 @@ Wzorzec zgodności: [renderer HA frontend 20260826.7](https://github.com/home-as
 
 ## Scenariusz trasy na dzień
 
+Przy planie w **Bibliotece tras** kliknij **Duplikuj**, aby użyć go jako szablonu — także gdy jest już ukończony. Otworzy się niezależny szkic z dopiskiem „(kopia)”, ze wszystkimi zastosowanymi punktami i godzinami, bez postępu wykonania. Zmień **Dzień trasy**, dostosuj punkty i kliknij **Zapisz plan**. Godziny pozostają zgodne ze strefą HA; data ze zmianą czasu może wymagać wybrania innej, jednoznacznej godziny. Oryginał pozostaje zachowany. Kopia zacznie wykonanie dopiero po osobnym **Start**; niezastosowany formularz punktu źródłowego pozostaje w źródle.
+
+Na mapie edytora trasy celownik **Użyj lokalizacji tego urządzenia** jednorazowo pobiera pozycję telefonu lub komputera z otwartym panelem. Po zgodzie przeglądarki pokazuje punkt i obszar dokładności oraz uzupełnia współrzędne lokalnego edytora. Dzień i godzina pozostają zachowane; punkt dodajesz lub zatwierdzasz osobno, a plan zapisujesz przez **Zapisz plan**.
+
+Przy godzinie wybierz odstęp **5, 10, 15, 20, 30, 45, 60, 90 lub 120 minut** (domyślnie 10), a następnie **Uzupełnij godzinę**. Podstawą jest ostatni chronologicznie punkt trasy. Pierwszy punkt ustawiasz ręcznie. Przycisk służy nowemu punktowi; podczas edycji istniejącego jest wyłączony. Nie dodaje ani nie zapisuje punktu automatycznie, a ponowne kliknięcie bez dodania punktu daje tę samą godzinę. Przekroczenie dnia trasy zgłasza komunikat, zamiast przenosić punkt na kolejny dzień.
+
 W panelu administratora otwórz **Plany i szkice**. Biblioteka pokazuje wszystkie zapisane trasy z osobą, dniem, godzinami, statusem i postępem; możesz filtrować ją według osoby i statusu. Przy każdym planie są osobne przyciski otwarcia, uruchomienia, zatrzymania i usunięcia. **Nowy plan** tworzy kolejny szkic dla wybranej osoby, bez zastępowania poprzedniego.
 
 Jedna osoba może mieć wiele planów. Możesz zapisać nazwany szkic bez punktów i wrócić do niego po odświeżeniu lub restarcie HA. Niezapisane zmiany pozostają tylko w tej karcie i mają osobne oznaczenie. Maksymalnie 100 zapisanych planów łącznie, każdy na jeden dzień w strefie HA i do 500 punktów o różnych godzinach. Oczekujące punkty można edytować i usuwać; wykonane pozostają częścią historii.
