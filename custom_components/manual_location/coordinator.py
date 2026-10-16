@@ -3,7 +3,7 @@
 import asyncio
 from copy import deepcopy
 from dataclasses import dataclass
-from datetime import UTC, datetime, timedelta
+from datetime import UTC, date, datetime, timedelta
 import math
 import logging
 import secrets
@@ -17,7 +17,7 @@ from homeassistant.helpers.storage import Store
 from homeassistant.util import dt as dt_util
 
 from .const import (
-    DOMAIN, MAX_HISTORY, MAX_PERSONS, MAX_SCENARIO_POINTS, PIN_MAX_ATTEMPTS, PIN_WINDOW_SECONDS,
+    DOMAIN, MAX_HISTORY, MAX_PERSONS, MAX_SCENARIOS, MAX_SCENARIO_POINTS, PIN_MAX_ATTEMPTS, PIN_WINDOW_SECONDS,
     SCENARIO_RETRY_SECONDS, SCENARIO_STORAGE_ATTEMPTS, SESSION_SECONDS, STORAGE_VERSION,
 )
 from .security import hash_pin, valid_pin, verify_pin
@@ -25,9 +25,21 @@ from .security import hash_pin, valid_pin, verify_pin
 _LOGGER = logging.getLogger(__name__)
 
 
-def scenario_points(hass, points: object, *, check_day=True) -> list[dict]:
+def scenario_day(value: object) -> str:
+    """Require a calendar day even when a saved draft has no points yet."""
+    if not isinstance(value, str):
+        raise LocationError("invalid_input")
+    try:
+        if date.fromisoformat(value).isoformat() != value:
+            raise ValueError
+    except ValueError:
+        raise LocationError("invalid_input") from None
+    return value
+
+
+def scenario_points(hass, points: object, *, check_day=True, day=None, allow_empty=False) -> list[dict]:
     """Normalize a one-day plan in the configured Home Assistant timezone."""
-    if not isinstance(points, list) or not 1 <= len(points) <= MAX_SCENARIO_POINTS:
+    if not isinstance(points, list) or not (0 if allow_empty else 1) <= len(points) <= MAX_SCENARIO_POINTS:
         raise LocationError("invalid_input")
     zone = dt_util.get_time_zone(hass.config.time_zone) if check_day else None
     if check_day and zone is None:
@@ -41,44 +53,76 @@ def scenario_points(hass, points: object, *, check_day=True) -> list[dict]:
         instants.add(instant)
         if check_day:
             try:
-                days.add(instant.astimezone(zone).date())
+                days.add(instant.astimezone(zone).date().isoformat())
             except (ValueError, OverflowError):
                 raise LocationError("invalid_input") from None
         result.append(normalized | {"timestamp": instant.isoformat()})
-    if check_day and len(days) != 1:
+    if check_day and (len(days) > 1 or (days and day is not None and days != {day})):
         raise LocationError("invalid_input")
     return sorted(result, key=lambda point: point["timestamp"])
 
 
+def validate_running_intervals(scenarios: dict):
+    """Running plans of one person reserve disjoint closed time intervals."""
+    running = sorted(
+        (scenario["entity_id"], scenario["points"][0]["timestamp"], scenario["points"][-1]["timestamp"])
+        for scenario in scenarios.values() if scenario["status"] == "running"
+    )
+    previous_person, previous_end = None, None
+    for entity_id, start, end in running:
+        if entity_id == previous_person and start <= previous_end:
+            raise LocationError("scenario_overlap")
+        previous_person, previous_end = entity_id, end
+
+
 def validate_scenarios(hass, scenarios: object) -> dict:
-    """Validate persisted plans, without requiring their people to exist at startup."""
-    if not isinstance(scenarios, dict) or len(scenarios) > MAX_PERSONS:
+    """Validate persisted plans and migrate the previous one-plan-per-person shape."""
+    if not isinstance(scenarios, dict) or len(scenarios) > MAX_SCENARIOS:
         raise LocationError("invalid_input")
+    legacy_fields = {"name", "points", "status", "cursor", "reason"}
+    new_fields = legacy_fields | {"entity_id", "day"}
+    legacy = bool(scenarios) and all(
+        isinstance(value, dict) and set(value) == legacy_fields for value in scenarios.values()
+    )
     result = {}
-    for entity_id, scenario in scenarios.items():
+    for key, original in scenarios.items():
+        if not isinstance(original, dict):
+            raise LocationError("invalid_input")
+        scenario = deepcopy(original)
+        if legacy:
+            zone = dt_util.get_time_zone(hass.config.time_zone)
+            if (
+                zone is None or not isinstance(scenario["points"], list) or not scenario["points"]
+                or not isinstance(scenario["points"][0], dict)
+            ):
+                raise LocationError("invalid_input")
+            scenario["entity_id"] = key
+            scenario["day"] = timestamp(scenario["points"][0].get("timestamp")).astimezone(zone).date().isoformat()
+            key = f"legacy:{key}"
         if (
-            not isinstance(entity_id, str) or not entity_id.startswith("person.")
-            or not isinstance(scenario, dict)
-            or set(scenario) != {"name", "points", "status", "cursor", "reason"}
+            not isinstance(key, str) or not 1 <= len(key) <= 120
+            or set(scenario) != new_fields
+            or not isinstance(scenario["entity_id"], str) or not scenario["entity_id"].startswith("person.")
             or not isinstance(scenario["name"], str) or not 1 <= len(scenario["name"].strip()) <= 80
             or scenario["status"] not in {"draft", "running", "stopped", "completed"}
             or type(scenario["cursor"]) is not int
             or not isinstance(scenario["reason"], str) or len(scenario["reason"]) > 80
         ):
             raise LocationError("invalid_input")
+        scenario_day(scenario["day"])
         # A timezone change must not invalidate a plan accepted in the old zone.
-        # Persisted points retain their UTC ordering and immutable executed prefix.
-        points = scenario_points(hass, scenario["points"], check_day=False)
+        points = scenario_points(hass, scenario["points"], check_day=False, allow_empty=True)
         cursor = scenario["cursor"]
         if (
             not 0 <= cursor <= len(points)
             or (scenario["status"] == "draft" and cursor != 0)
             or (scenario["status"] == "running" and cursor == len(points))
-            or (scenario["status"] == "completed" and cursor != len(points))
+            or (scenario["status"] == "completed" and (not points or cursor != len(points)))
             or points != scenario["points"]
         ):
             raise LocationError("invalid_input")
-        result[entity_id] = deepcopy(scenario)
+        result[key] = scenario
+    validate_running_intervals(result)
     return result
 
 
@@ -211,6 +255,7 @@ class ManualLocation:
                 or type(stored["enabled"]) is not bool or not isinstance(stored["persons"], dict)
             ):
                 raise LocationError("storage_error")
+            original = deepcopy(stored)
             now = datetime.now(UTC)
             try:
                 for person in stored["persons"].values():
@@ -220,8 +265,15 @@ class ManualLocation:
                     self.hass, stored["persons"], stored["persons"], now, check_entities=False
                 )
                 stored["scenarios"] = validate_scenarios(self.hass, stored.get("scenarios", {}))
-            except (LocationError, KeyError, TypeError):
+            except (LocationError, KeyError, TypeError, ValueError, OverflowError):
                 raise LocationError("storage_error") from None
+            if stored != original:
+                try:
+                    await self.store.async_save(stored)
+                    if await self.store.async_load() != stored:
+                        raise LocationError("storage_error")
+                except Exception:
+                    raise LocationError("storage_error") from None
             self.data = stored
         if not self.entry.data.get("storage_initialized"):
             self.hass.config_entries.async_update_entry(
@@ -279,8 +331,8 @@ class ManualLocation:
         snapshot = deepcopy(self.data)
         # A failed disk cannot persist a stop. Report the local safety suspension
         # without pretending the durable cursor or snapshot has advanced.
-        for entity_id in self._suspended:
-            if scenario := snapshot["scenarios"].get(entity_id):
+        for scenario_id in self._suspended:
+            if scenario := snapshot["scenarios"].get(scenario_id):
                 scenario.update(status="stopped", reason="storage_error")
         return snapshot
 
@@ -294,9 +346,10 @@ class ManualLocation:
         """Commit history/current/cursors together and confirm actual persistence."""
         self._require_loaded()
         # Any later successful write makes a previous local suspension durable.
-        for entity_id in self._suspended:
-            if (scenario := snapshot["scenarios"].get(entity_id)) and scenario["status"] == "running":
+        for scenario_id in self._suspended:
+            if (scenario := snapshot["scenarios"].get(scenario_id)) and scenario["status"] == "running":
                 scenario.update(status="stopped", reason="storage_error")
+        validate_running_intervals(snapshot["scenarios"])
         await self.store.async_save(snapshot)
         if await self.store.async_load() != snapshot:
             raise LocationError("storage_error")
@@ -317,7 +370,8 @@ class ManualLocation:
                 "persons": validate_persons(self.hass, persons, self.data["persons"], datetime.now(UTC)),
                 "scenarios": deepcopy(self.data["scenarios"]),
             }
-            for entity_id, scenario in snapshot["scenarios"].items():
+            for scenario in snapshot["scenarios"].values():
+                entity_id = scenario["entity_id"]
                 if scenario["status"] == "running":
                     if not enabled:
                         scenario.update(status="stopped", reason="global_disabled")
@@ -327,7 +381,7 @@ class ManualLocation:
             self._reschedule()
             return self._snapshot()
 
-    async def async_save_scenario(self, connection, token, revision, entity_id, name, points):
+    async def async_save_scenario(self, connection, token, revision, scenario_id, entity_id, day, name, points):
         async with self._save_lock:
             self.require_session(connection, token)
             self._require_revision(revision)
@@ -335,28 +389,38 @@ class ManualLocation:
                 not isinstance(entity_id, str) or not entity_id.startswith("person.")
                 or self.hass.states.get(entity_id) is None
                 or not isinstance(name, str) or not 1 <= len(name.strip()) <= 80
+                or (scenario_id is not None and not isinstance(scenario_id, str))
             ):
                 raise LocationError("invalid_input")
-            previous = self.data["scenarios"].get(entity_id)
-            if previous and previous["status"] == "running" and entity_id not in self._suspended:
-                raise LocationError("scenario_running")
-            if previous is None and len(self.data["scenarios"]) >= MAX_PERSONS:
+            day = scenario_day(day)
+            previous = self.data["scenarios"].get(scenario_id) if scenario_id is not None else None
+            if scenario_id is not None and previous is None:
+                raise LocationError("scenario_missing")
+            if previous and previous["entity_id"] != entity_id:
                 raise LocationError("invalid_input")
-            normalized = scenario_points(self.hass, points)
+            if previous and previous["status"] == "running" and scenario_id not in self._suspended:
+                raise LocationError("scenario_running")
+            if previous is None and len(self.data["scenarios"]) >= MAX_SCENARIOS:
+                raise LocationError("scenario_limit")
             cursor = previous["cursor"] if previous else 0
+            if previous and cursor > 0 and day != previous["day"]:
+                raise LocationError("executed_prefix")
+            normalized = scenario_points(self.hass, points, day=day, allow_empty=True)
             if previous and normalized[:cursor] != previous["points"][:cursor]:
                 raise LocationError("executed_prefix")
             status = previous["status"] if previous else "draft"
             reason = previous["reason"] if previous else ""
-            if entity_id in self._suspended:
+            if scenario_id in self._suspended:
                 status, reason = "stopped", "storage_error"
             if status == "completed" and len(normalized) > cursor:
                 status, reason = "stopped", ""
+            if scenario_id is None:
+                scenario_id = secrets.token_hex(16)
             snapshot = deepcopy(self.data)
             snapshot["revision"] += 1
-            snapshot["scenarios"][entity_id] = {
-                "name": name.strip(), "points": normalized, "status": status,
-                "cursor": cursor, "reason": reason,
+            snapshot["scenarios"][scenario_id] = {
+                "entity_id": entity_id, "day": day, "name": name.strip(), "points": normalized,
+                "status": status, "cursor": cursor, "reason": reason,
             }
             await self._commit(snapshot)
             self._reschedule()
@@ -384,9 +448,13 @@ class ManualLocation:
     def _advance_scenarios(self, snapshot, now):
         """Catch up in one snapshot, preserving each original point timestamp."""
         changed = False
-        for entity_id, scenario in snapshot["scenarios"].items():
-            if scenario["status"] != "running" or entity_id in self._suspended:
-                continue
+        running = sorted(
+            ((scenario_id, scenario) for scenario_id, scenario in snapshot["scenarios"].items()
+             if scenario["status"] == "running" and scenario_id not in self._suspended),
+            key=lambda item: item[1]["points"][item[1]["cursor"]]["timestamp"],
+        )
+        for scenario_id, scenario in running:
+            entity_id = scenario["entity_id"]
             if reason := self._scenario_problem(snapshot, entity_id, scenario):
                 scenario.update(status="stopped", reason=reason)
                 changed = True
@@ -401,45 +469,48 @@ class ManualLocation:
             person = snapshot["persons"].setdefault(entity_id, {"enabled": True, "history": []})
             person["history"].extend(due)
             person["history"].sort(key=lambda point: point["timestamp"])
-            person["current"] = deepcopy(due[-1])
+            if "current" not in person or person["current"]["timestamp"] < due[-1]["timestamp"]:
+                person["current"] = deepcopy(due[-1])
             scenario["cursor"] += len(due)
             if scenario["cursor"] == len(scenario["points"]):
                 scenario.update(status="completed", reason="")
             changed = True
         return changed
 
-    async def async_scenario_action(self, connection, token, revision, entity_id, action):
+    async def async_scenario_action(self, connection, token, revision, scenario_id, action):
         async with self._save_lock:
             self.require_session(connection, token)
             self._require_revision(revision)
-            if not isinstance(entity_id, str) or not isinstance(action, str) or action not in {"start", "stop", "delete"}:
+            if not isinstance(scenario_id, str) or not isinstance(action, str) or action not in {"start", "stop", "delete"}:
                 raise LocationError("invalid_input")
-            snapshot = deepcopy(self.data)
-            scenario = snapshot["scenarios"].get(entity_id)
+            snapshot = self._snapshot()
+            scenario = snapshot["scenarios"].get(scenario_id)
             if scenario is None:
                 raise LocationError("scenario_missing")
+            entity_id = scenario["entity_id"]
             if action == "delete":
-                del snapshot["scenarios"][entity_id]
+                del snapshot["scenarios"][scenario_id]
             elif action == "stop":
                 scenario.update(status="stopped", reason="user_stop")
             else:
-                if scenario["status"] == "running" and entity_id not in self._suspended:
+                if scenario["status"] == "running" and scenario_id not in self._suspended:
                     raise LocationError("scenario_running")
                 if scenario["cursor"] == len(scenario["points"]):
                     raise LocationError("no_pending_points")
                 if reason := self._scenario_problem(snapshot, entity_id, scenario):
                     raise LocationError(reason)
                 scenario.update(status="running", reason="")
+                validate_running_intervals(snapshot["scenarios"])
                 # Explicit Start is permission to recover this suspended plan.
-                suspended = entity_id in self._suspended
-                self._suspended.discard(entity_id)
+                suspended = scenario_id in self._suspended
+                self._suspended.discard(scenario_id)
                 try:
                     self._advance_scenarios(snapshot, datetime.now(UTC))
                     snapshot["revision"] += 1
                     await self._commit(snapshot)
                 except Exception:
                     if suspended:
-                        self._suspended.add(entity_id)
+                        self._suspended.add(scenario_id)
                     raise
                 self._reschedule()
                 return self._snapshot()
@@ -470,12 +541,14 @@ class ManualLocation:
         if not self.loaded or not self._started:
             return
         running = {
-            entity_id: scenario for entity_id, scenario in self.data["scenarios"].items()
-            if scenario["status"] == "running" and entity_id not in self._suspended
+            scenario_id: scenario for scenario_id, scenario in self.data["scenarios"].items()
+            if scenario["status"] == "running" and scenario_id not in self._suspended
         }
         if not running:
             return
-        self._state_cancel = async_track_state_change_event(self.hass, list(running), self._async_person_changed)
+        self._state_cancel = async_track_state_change_event(
+            self.hass, sorted({scenario["entity_id"] for scenario in running.values()}), self._async_person_changed,
+        )
         deadline = self._retry_at or min(
             timestamp(scenario["points"][scenario["cursor"]]["timestamp"])
             for scenario in running.values()

@@ -1,7 +1,7 @@
-import { adminPersonOptions, callWS, editHistory, errorText, localDateInput, readPoint, removeHistory } from "./data.js?v=0.1.10";
-import { L, makeMap, mapStyles, popup } from "./map-common.js?v=0.1.10";
-import { registerReloadBlocker, startUpdateCheck } from "./updates.js?v=0.1.10";
-import "./scenarios.js?v=0.1.10";
+import { adminPersonOptions, callWS, editHistory, errorText, localDateInput, readPoint, removeHistory } from "./data.js?v=0.1.11";
+import { L, makeMap, mapStyles, popup } from "./map-common.js?v=0.1.11";
+import { registerReloadBlocker, startUpdateCheck } from "./updates.js?v=0.1.11";
+import "./scenarios.js?v=0.1.11";
 
 const DRAFT_COLOR = "#7c3aed";
 const EDIT_COLOR = "#c65d00";
@@ -17,6 +17,7 @@ export class ManualLocationAdmin extends HTMLElement {
     this._editIndex = -1;
     this._currentDrafts = {};
     this._scenarioDrafts = {};
+    this._scenarioView = { selectedByEntity: {}, personFilter: "", statusFilter: "", nextLocal: 0 };
     const markEditing = (event) => {
       if (event.target?.tagName?.toLowerCase() === "manual-location-scenarios") return;
       if (["person", "pin", "new-pin"].includes(event.target?.id)) return;
@@ -75,7 +76,10 @@ export class ManualLocationAdmin extends HTMLElement {
       this._retained = { owner: this._hass?.user?.id, snapshot: this._snapshot, saved: this._savedSnapshot,
         currentDrafts: this._currentDrafts, dirty: this._dirty, editing: this._editing, editIndex: this._editIndex,
         fields: Object.fromEntries(["current-lat", "current-lon", "history-lat", "history-lon", "history-time"].map((id) => [id, this.shadowRoot.querySelector(`#${id}`)?.value ?? ""])) };
-    } else if (!preserve) { this._retained = null; this._scenarioDrafts = {}; }
+    } else if (!preserve) {
+      this._retained = null; this._scenarioDrafts = {};
+      this._scenarioView = { selectedByEntity: {}, personFilter: "", statusFilter: "", nextLocal: 0 };
+    }
     this._cancelLocation();
     this._epoch++;
     this._token = null;
@@ -104,11 +108,12 @@ export class ManualLocationAdmin extends HTMLElement {
     const child = this.shadowRoot.querySelector("manual-location-scenarios");
     if (!child || !this._token || !this._snapshot) return;
     this._scenarios = child;
-    child.context = { drafts: this._scenarioDrafts,
+    child.context = { drafts: this._scenarioDrafts, view: this._scenarioView,
       getState: () => ({ hass: this._hass, token: this._token, snapshot: this._snapshot, entityId: this._selected,
         busy: !!this._busy, parentDirty: !!(this._dirty || this._editing || this._editIndex >= 0) }),
       onSnapshot: (snapshot) => this._acceptScenarioSnapshot(snapshot),
       onStateChange: () => this._saveState(),
+      onSelectPerson: (entityId) => this._selectPerson(entityId),
       onExpired: (text) => this._clearSession(`${text} Szkice zachowano w tej karcie.`, true),
     };
   }
@@ -148,6 +153,15 @@ export class ManualLocationAdmin extends HTMLElement {
     const pinChange = this.shadowRoot.querySelector(".pin-change");
     if (pinChange) pinChange.inert = !!(this._busy || this._scenarios?.busy);
     this._syncScenarios();
+  }
+  _selectPerson(entityId) {
+    const select = this.shadowRoot.querySelector("#person");
+    if (this._scenarios?.busy || this._busy) { select.value = this._selected; return false; }
+    if (entityId === this._selected) return true;
+    if ((this._editing || this._editIndex >= 0) && !window.confirm("Zmienić osobę? Niezastosowane pola bieżącej pozycji i historii zostaną odrzucone. Przygotowane pozycje, historia i szkice planów pozostaną.")) { select.value = this._selected; return false; }
+    this._selected = entityId; select.value = entityId;
+    this._editIndex = -1; this._editing = false; this._refreshPerson(); this._saveState();
+    return true;
   }
 
   _render() {
@@ -208,7 +222,8 @@ export class ManualLocationAdmin extends HTMLElement {
     this._resize = new ResizeObserver(() => this._map?.invalidateSize());
     this._resize.observe(this.shadowRoot.querySelector("#map"));
     const select = this.shadowRoot.querySelector("#person");
-    const persons = adminPersonOptions(this._hass.states, this._snapshot.persons);
+    const scenarioOwners = Object.fromEntries(Object.values(this._snapshot.scenarios || {}).map((plan) => [plan.entity_id, {}]));
+    const persons = adminPersonOptions(this._hass.states, { ...scenarioOwners, ...this._snapshot.persons });
     for (const person of persons) {
       const option = document.createElement("option");
       option.value = person.id;
@@ -217,11 +232,7 @@ export class ManualLocationAdmin extends HTMLElement {
     }
     if (!persons.some((p) => p.id === this._selected)) this._selected = persons[0]?.id || "";
     select.value = this._selected;
-    select.addEventListener("change", () => {
-      if (this._scenarios?.busy || this._busy) { select.value = this._selected; return; }
-      if ((this._editing || this._editIndex >= 0) && !window.confirm("Zmienić osobę? Niezastosowane pola bieżącej pozycji i historii zostaną odrzucone. Przygotowane pozycje, historia i szkice planów pozostaną.")) { select.value = this._selected; return; }
-      this._selected = select.value; this._editIndex = -1; this._editing = false; this._refreshPerson(); this._saveState();
-    });
+    select.addEventListener("change", () => this._selectPerson(select.value));
     const global = this.shadowRoot.querySelector("#global-enabled");
     global.checked = this._snapshot.enabled;
     global.addEventListener("change", () => { this._snapshot.enabled = global.checked; this._changed(); });
@@ -600,6 +611,7 @@ export class ManualLocationAdmin extends HTMLElement {
     this._savedSnapshot = structuredClone(result.data);
     this._currentDrafts = {};
     this._scenarioDrafts = {};
+    this._scenarioView = { selectedByEntity: {}, personFilter: "", statusFilter: "", nextLocal: 0 };
     this._dirty = false; this._editing = false; this._editIndex = -1;
     this._render();
     this._message("Wczytano zapisane dane.", true);

@@ -18,8 +18,8 @@ FIELDS = {
     "unlock": {"pin"},
     "admin_get": {"token"},
     "admin_save": {"token", "revision", "enabled", "persons"},
-    "scenario_save": {"token", "revision", "entity_id", "name", "points"},
-    "scenario_action": {"token", "revision", "entity_id", "action"},
+    "scenario_save": {"token", "revision", "scenario_id", "entity_id", "day", "name", "points"},
+    "scenario_action": {"token", "revision", "scenario_id", "action"},
     "lock": {"token"},
     "change_pin": {"token", "new_pin"},
 }
@@ -45,6 +45,8 @@ async def async_handle_command(hass, connection, msg):
         # read-only and must never overwrite the server's authoritative plans.
         if operation == "admin_save":
             fields.discard("scenarios")
+        if operation in {"scenario_save", "scenario_action"} and "scenario_id" not in fields:
+            raise LocationError("client_outdated")
         if fields != FIELDS[operation]:
             raise LocationError("invalid_input")
         if operation == "version":
@@ -59,11 +61,11 @@ async def async_handle_command(hass, connection, msg):
             result = await coordinator.async_save(connection, msg["token"], msg["revision"], msg["enabled"], msg["persons"])
         elif operation == "scenario_save":
             result = await coordinator.async_save_scenario(
-                connection, msg["token"], msg["revision"], msg["entity_id"], msg["name"], msg["points"],
+                connection, msg["token"], msg["revision"], msg["scenario_id"], msg["entity_id"], msg["day"], msg["name"], msg["points"],
             )
         elif operation == "scenario_action":
             result = await coordinator.async_scenario_action(
-                connection, msg["token"], msg["revision"], msg["entity_id"], msg["action"],
+                connection, msg["token"], msg["revision"], msg["scenario_id"], msg["action"],
             )
         elif operation == "change_pin":
             result = await coordinator.async_change_pin(connection, msg["token"], msg["new_pin"])
