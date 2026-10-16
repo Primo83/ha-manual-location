@@ -79,3 +79,9 @@ Długość widocznej trasy określa `hours_to_show` w każdej karcie. Wartość 
 Okno mapy nie usuwa zapisanej historii z panelu administratora. Bieżący marker nadal pokazuje osobno zapisaną pozycję, również gdy historia jest pusta lub zawiera tylko starsze wpisy. Zachowane są zdjęcia oraz ręcznie wybrany zoom.
 
 Wzorzec zgodności: [renderer HA frontend 20260826.7](https://github.com/home-assistant/frontend/blob/20260826.7/src/components/map/ha-map.ts) oraz [karta mapy](https://github.com/home-assistant/frontend/blob/20260826.7/src/panels/lovelace/cards/hui-map-card.ts). Uwzględniono prawidłową, skończoną przezroczystość także dla pojedynczego punktu i trasy z dwoma punktami.
+
+## Edycja punktu na mapie
+
+Kliknij **Edytuj** przy zapisanym punkcie lub szkicu: mapa pokaże wyróżniony pomarańczowy znacznik z datą i godziną. Kliknięcie nowego miejsca zmienia jego podgląd i współrzędne w formularzu. Ręczne wpisanie współrzędnych również przesuwa znacznik. Godzina pozostaje zachowana, dopóki nie zmienisz jej w polu czasu. Niepoprawne współrzędne lub czas ukrywają podgląd do poprawienia formularza.
+
+Przy mapie kliknij **Zastosuj edycję**, aby przygotować zmianę, albo **Anuluj edycję**, aby ją odrzucić. Dane zostaną utrwalone po **Zapisz wszystkie zmiany**; podczas trwającej edycji należy ją najpierw zastosować albo anulować. Inne przygotowane szkice pozostają w formularzu.
