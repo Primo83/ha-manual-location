@@ -64,7 +64,6 @@ async def async_setup_entry(hass, entry):
         hass, frontend_url_path=PANEL_PATH, webcomponent_name="manual-location-admin",
         sidebar_title="Ustawienia mapy", sidebar_icon="mdi:map-marker-radius",
         module_url=f"{STATIC_PATH}/admin.js?v={coordinator.version}", require_admin=True,
-        config_panel_domain=DOMAIN,
     )
     hass.data[DOMAIN] = coordinator
     await coordinator.async_start()
