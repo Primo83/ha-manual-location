@@ -1,7 +1,7 @@
-import { callWS, coordinates, errorText } from "./data.js?v=0.1.20";
-import { L, makeMap, mapStyles, setMapHass } from "./map-common.js?v=0.1.20";
-import "./place-search.js?v=0.1.20";
-import "./route-import.js?v=0.1.20";
+import { callWS, coordinates, errorText } from "./data.js?v=0.1.21";
+import { L, makeMap, mapStyles, setMapHass } from "./map-common.js?v=0.1.21";
+import "./place-search.js?v=0.1.21";
+import "./route-import.js?v=0.1.21";
 
 const STATUS = { draft: "Przygotowany", running: "Uruchomiony", stopped: "Zatrzymany", completed: "Ukończony" };
 const REASON = { global_disabled: "Wyłączono ręczne lokalizacje.", person_missing: "Tej osoby nie ma w HA.",
@@ -79,6 +79,7 @@ export class ManualLocationScenarios extends HTMLElement {
     this._cancelLocation();
     this._generation++;
     this._resize?.disconnect(); this._map?.remove(); this._map = null; this._layers = null;
+    this._routeStopsLayer = null; this._routeMapState = null;
     this._locateButton = null;
   }
   _state() { return this._context.getState(); }
@@ -200,6 +201,17 @@ export class ManualLocationScenarios extends HTMLElement {
         stamp: JSON.stringify([this._generation, this._selected, this._planId, this._draft, state.snapshot?.scenarios?.[this._planId]]) }; },
       onImport: (dto, settings) => this._importRoute(dto, settings),
       onExpired: (message) => this._context.onExpired(message),
+      onMapStateChange: (mapState) => { this._routeMapState = mapState; this._drawRouteStops(); },
+      onPickMap: () => {
+        this._cancelLocation(); this._placeSearch?.cancel?.();
+        const current = this._routeMapState?.stops[0] || coordinates(this._state().snapshot?.persons?.[this._selected]?.current);
+        if (current && this._map.getZoom() < 8) this._map.setView([current.latitude, current.longitude], 14);
+        this.shadowRoot.querySelector("#scenario-map").scrollIntoView?.({ block: "center", behavior: "smooth" });
+      },
+      onShowStops: () => {
+        const points = this._routeMapState?.stops || [];
+        if (points.length) this._map.fitBounds(points.map((point) => [point.latitude, point.longitude]), { padding: [40, 40], maxZoom: 14 });
+      },
     };
   }
   _importRoute(dto, { day, startTime }) {
@@ -311,7 +323,7 @@ export class ManualLocationScenarios extends HTMLElement {
       .library{padding:22px;border-bottom:1px solid var(--divider-color,#d9e2e0)}.library-head{display:flex;align-items:center;justify-content:space-between;gap:14px}.filters{display:grid;grid-template-columns:1fr 1fr;gap:12px;margin:18px 0}.filters label{margin:0}.filters select{display:block;width:100%;margin-top:7px;min-height:42px;padding:9px 11px;font:inherit;color:inherit;background:var(--input-fill-color,var(--card-background-color,#fff));border:1px solid var(--divider-color,#c8d6d4);border-radius:7px}.plans{max-height:410px;overflow:auto}.plan-row{padding:14px 0;display:flex;align-items:center;justify-content:space-between;gap:16px;border-top:1px solid var(--divider-color,#d9e2e0)}.plan-row.selected{border-left:3px solid #176e82;padding-left:12px;background:#176e8209}.plan-row.local{border-left:3px solid #7c3aed;padding-left:12px;background:#7c3aed0b}.plan-row strong,.plan-row small{display:block;overflow-wrap:anywhere}.plan-row small{font-size:12px;line-height:1.6;margin-top:4px;color:var(--secondary-text-color,#657a82)}.plan-row .actions{flex-shrink:0}.plan-row button{min-height:34px;padding:5px 10px}.library-note{font-size:12px;line-height:1.6;color:var(--secondary-text-color,#657a82);margin:14px 0 0}@media(max-width:760px){.library{padding:18px}.plan-row{align-items:flex-start;flex-direction:column;gap:10px}.plan-row .actions{width:100%}.library-head{align-items:flex-start}.filters{gap:10px}}@media(max-width:400px){.filters{grid-template-columns:1fr}}
       </style><section class="box" aria-label="Scenariusze tras"><div class="library"><div class="library-head"><div><div class="eyebrow">Plany i zapisane szkice</div><h2>Biblioteka tras</h2></div><button id="scenario-new">Nowy plan</button></div><div class="filters"><label for="scenario-filter-person">Osoba<select id="scenario-filter-person" aria-label="Filtr osób w bibliotece"></select></label><label for="scenario-filter-status">Status<select id="scenario-filter-status" aria-label="Filtr statusu planów"></select></label></div><div class="plans" id="scenario-library" aria-label="Lista planów i szkiców"></div><p class="library-note">Zapisane plany i szkice pozostają w HA po odświeżeniu. Fioletowe szkice mają lokalne niezapisane zmiany. Możesz zapisać wiele wariantów, ale uruchomione trasy tej samej osoby nie mogą nakładać się godzinami. Różne osoby mogą mieć trasy równocześnie.</p></div><div class="top"><div><div class="eyebrow">Plan na konkretny dzień</div><h2>Edytor trasy</h2><p class="sub" id="scenario-person"></p></div><span class="badge" id="scenario-status"></span></div><div id="scenario-message" role="status" hidden></div>
       <manual-location-route-import id="route-import"></manual-location-route-import><div class="body"><div class="settings"><fieldset id="scenario-fields"><div class="field"><label for="scenario-name">Nazwa planu</label><input id="scenario-name" maxlength="80" placeholder="np. Popołudniowa trasa"></div><div class="field"><label for="scenario-day">Dzień trasy</label><input id="scenario-day" type="date" required><p class="sub" id="scenario-zone"></p></div><div class="field"><h3>Czas trasy</h3><p class="sub">Przesuwasz wybrany oczekujący punkt i wszystkie kolejne. Wykonane punkty pozostają bez zmian. Zmiany zastosujesz w HA przyciskiem Zapisz plan.</p><label for="scenario-start-time">Godzina pierwszego oczekującego punktu</label><div class="time-tools"><input id="scenario-start-time" type="time" step="1"><button id="scenario-set-start" type="button">Ustaw początek</button></div><p class="sub" id="scenario-shift-anchor"></p><label for="scenario-shift-minutes">Przesunięcie w minutach (np. 30 lub −15)</label><div class="time-tools"><input id="scenario-shift-minutes" type="number" step="1" min="-1440" max="1440"><button id="scenario-shift" type="button">Przesuń o minuty</button></div><label for="scenario-shift-time">Nowa godzina wybranego punktu</label><div class="time-tools"><input id="scenario-shift-time" type="time" step="1"><button id="scenario-shift-to" type="button">Przesuń do godziny</button></div></div><div id="scenario-point-home"><form id="scenario-point-form"><fieldset id="scenario-point-fields"><div class="field"><label for="scenario-time">Godzina punktu</label><input id="scenario-time" type="time" step="1" required><div class="time-tools"><select id="scenario-interval" aria-label="Odstęp od ostatniego punktu">${INTERVALS.map((minutes) => `<option value="${minutes}">${minutes} min</option>`).join("")}</select><button id="scenario-fill-time" type="button">Uzupełnij godzinę</button></div><p class="sub">Pierwszą godzinę wpisz ręcznie. Kolejną uzupełnisz o wybrany odstęp od ostatniego punktu planu.</p></div><div class="pair"><div class="field"><label for="scenario-lat">Szerokość</label><input id="scenario-lat" type="number" step="any" min="-90" max="90" required></div><div class="field"><label for="scenario-lon">Długość</label><input id="scenario-lon" type="number" step="any" min="-180" max="180" required></div></div><div class="actions"><button id="scenario-add" type="submit">Dodaj punkt do planu</button><button id="scenario-cancel" type="button" hidden>Anuluj edycję</button></div></fieldset></form></div></fieldset><p class="sub notice">Nowy lub zatrzymany plan uruchomisz przyciskiem Start. Zapis uruchomionej trasy zachowuje jej działanie; można zmieniać tylko oczekujące punkty z godzinami w przyszłości. HA wykonuje plan także po zamknięciu przeglądarki.</p></div>
-      <div><manual-location-place-search id="route-place-search"></manual-location-place-search><div class="map" id="scenario-map" aria-label="Podgląd całej zaplanowanej trasy"></div><div class="caption">Kliknij mapę, aby wybrać lub przesunąć edytowany punkt. Cała trasa jest widoczna wyłącznie w tym podglądzie administratora.</div></div></div>
+      <div><manual-location-place-search id="route-place-search"></manual-location-place-search><div class="caption" id="route-map-pick-controls" hidden><p id="route-map-pick-status" role="status"></p><button id="route-map-pick-cancel" type="button">Anuluj wskazywanie</button></div><div class="map" id="scenario-map" aria-label="Podgląd całej zaplanowanej trasy"></div><div class="caption">Kliknij mapę, aby wybrać lub przesunąć edytowany punkt. Cała trasa jest widoczna wyłącznie w tym podglądzie administratora.</div></div></div>
       <div class="timeline"><div class="timeline-head"><h3>Punkty po kolei</h3><span class="save-state" id="scenario-count"></span></div><div class="rows" id="scenario-list"></div><p class="sub" id="scenario-reason"></p><p class="sub">Stop pozostaje aktywny po restarcie. Ręczna zmiana pozycji, historii lub ustawień osoby także zatrzymuje jej plan. Ponowne włączenie lokalizacji nie uruchamia planu.</p></div>
       <div class="footer"><span class="save-state" id="scenario-save-state"></span><div class="actions"><button class="primary" id="scenario-save">Zapisz plan</button><button id="scenario-start">Start</button><button id="scenario-stop">Stop</button><button class="danger" id="scenario-delete">Usuń plan</button><button id="scenario-discard">Odrzuć szkic planu</button></div></div></section>`;
     mapStyles(this.shadowRoot);
@@ -330,12 +342,14 @@ export class ManualLocationScenarios extends HTMLElement {
     };
     locateControl.addTo(this._map);
     this._map.on("click", ({ latlng }) => {
+      if (this.shadowRoot.querySelector("#route-import")?.chooseMapPoint?.({ latitude: latlng.lat, longitude: latlng.lng })) return;
       if (!this._editable()) return;
       this._cancelLocation();
       this._draft.editor.latitude = latlng.lat.toFixed(6); this._draft.editor.longitude = latlng.lng.toFixed(6);
       this._draft.editing = true; this._refresh(); this._notify();
       this._message("Miejsce wybrane. Uzupełnij godzinę i dodaj punkt albo zastosuj edycję.", true);
     });
+    this.shadowRoot.querySelector("#route-map-pick-cancel").addEventListener("click", () => this.shadowRoot.querySelector("#route-import")?.cancelMapPick?.());
     this._resize = new ResizeObserver(() => this._map?.invalidateSize()); this._resize.observe(this.shadowRoot.querySelector("#scenario-map"));
     this.shadowRoot.querySelector("#scenario-name").addEventListener("input", (event) => {
       this._cancelLocation();
@@ -536,6 +550,22 @@ export class ManualLocationScenarios extends HTMLElement {
     const mapElement = this.shadowRoot.querySelector("#scenario-map"); mapElement.classList.toggle("map-dark", !!this._state().hass.themes?.darkMode);
     if (fit && path.length) this._map.fitBounds(path, { padding: [35, 35], maxZoom: 14 });
     else if (fit) this._map.setView([25, 0], 2);
+    this._drawRouteStops();
+  }
+  _drawRouteStops() {
+    if (!this._map) return;
+    this._routeStopsLayer ||= L.layerGroup().addTo(this._map);
+    this._routeStopsLayer.clearLayers();
+    const { stops = [], picking = null } = this._routeMapState || {};
+    const controls = this.shadowRoot.querySelector("#route-map-pick-controls"); controls.hidden = picking === null;
+    this.shadowRoot.querySelector("#route-map-pick-status").textContent = picking === 0 ? "Kliknij mapę, aby wskazać początek trasy." : "Kliknij mapę, aby wskazać cel trasy.";
+    this.shadowRoot.querySelector("#scenario-map").style.cursor = picking === null ? "" : "crosshair";
+    stops.forEach((point) => {
+      const label = document.createElement("span"); label.textContent = point.index === 0 ? "Początek" : "Cel";
+      L.circleMarker([point.latitude, point.longitude], { radius: point.index === 0 ? 12 : 8, color: "#fff", weight: 3,
+        fillColor: point.index === 0 ? "#176e82" : "#b74435", fillOpacity: 1, interactive: false })
+        .bindTooltip(label, { permanent: true, direction: point.index === 0 ? "top" : "bottom" }).addTo(this._routeStopsLayer);
+    });
   }
   _changeDay() {
     if (!this._editable() || this._server?.cursor > 0) return;

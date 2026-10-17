@@ -1,8 +1,8 @@
-import { adminPersonOptions, callWS, editHistory, errorText, localDateInput, readPoint, removeHistory } from "./data.js?v=0.1.20";
-import { L, makeMap, mapStyles, popup } from "./map-common.js?v=0.1.20";
-import { registerReloadBlocker, startUpdateCheck } from "./updates.js?v=0.1.20";
-import "./scenarios.js?v=0.1.20";
-import "./place-search.js?v=0.1.20";
+import { adminPersonOptions, callWS, editHistory, errorText, localDateInput, readPoint, removeHistory } from "./data.js?v=0.1.21";
+import { L, makeMap, mapStyles, popup } from "./map-common.js?v=0.1.21";
+import { registerReloadBlocker, startUpdateCheck } from "./updates.js?v=0.1.21";
+import "./scenarios.js?v=0.1.21";
+import "./place-search.js?v=0.1.21";
 
 const DRAFT_COLOR = "#7c3aed";
 const EDIT_COLOR = "#c65d00";
@@ -109,7 +109,7 @@ export class ManualLocationAdmin extends HTMLElement {
     clearTimeout(this._pollTimer); this._pollTimer = null;
     if (this.isConnected) { this._render(); this._message(message); }
   }
-  _destroyMap() { this._editMarker?.remove(); this._editMarker = null; this._cancelLocation(); this._resize?.disconnect(); this._map?.remove(); this._map = null; this._locateButton = null; }
+  _destroyMap() { this._historySelectionLayers?.remove(); this._historySelectionLayers = null; this._editMarker?.remove(); this._editMarker = null; this._cancelLocation(); this._resize?.disconnect(); this._map?.remove(); this._map = null; this._locateButton = null; }
   _message(text, good = false) {
     const box = this.shadowRoot.querySelector("#message");
     if (box) { box.textContent = text; box.classList.toggle("good", good); box.hidden = !text; }
@@ -231,6 +231,7 @@ export class ManualLocationAdmin extends HTMLElement {
       @media(max-width:900px){.layout{grid-template-columns:1fr}.sidebar{display:grid;grid-template-columns:1fr 1fr}.history-editor{grid-template-columns:1fr 1fr}.map{height:340px}}@media(max-width:580px){main{padding:22px 14px 36px}header{align-items:flex-start}h1{font-size:27px}.sidebar{display:flex}.box{padding:18px}.mapbox{padding:0}.history-editor{grid-template-columns:1fr 1fr}.history-editor .timefield{grid-column:1/-1}.footer{align-items:flex-start;flex-direction:column}.row{align-items:flex-start}.map{height:290px}}
       .map-edit-tools{padding:14px 18px;border-top:2px solid #c65d00;background:#c65d0010}.map-edit-tools p{margin:0 0 10px;font-size:13px;line-height:1.5}.map-edit-tools .actions{align-items:center}.leaflet-tooltip.edit-point-tooltip{white-space:normal;max-width:220px;border-color:#c65d00}
       .leaflet-tooltip.device-location-tooltip{width:180px;white-space:normal;text-align:center}
+      .leaflet-tooltip.history-selection-tooltip{max-width:230px;white-space:normal;text-align:center;background:#fff5b8;color:#172b4d;border:2px solid #172b4d;font-weight:600}.history-selection-times{max-height:190px;overflow:auto;margin-top:6px}
       .layout>*,.sidebar>*,.field,input{min-width:0}.scroll{position:relative}.row>div:first-child{min-width:0;overflow-wrap:anywhere}.row .actions{flex-shrink:0}.trash{width:40px;display:grid;place-items:center}.savebar{display:flex;align-items:center;justify-content:space-between;gap:12px;flex-wrap:wrap;margin:16px 0 12px}@media(max-width:580px){.savebar{flex-direction:column;align-items:stretch}.savebar #save{order:1}}.savebar span{font-size:13px;color:var(--secondary-text-color,#657a82)}.row.draft{background:#7c3aed14;border-left:3px solid #7c3aed;padding-left:10px;padding-right:10px}.draft-badge,.current-badge{display:inline-block;margin-top:6px;font-size:12px;font-weight:700}.draft-badge::before,.current-badge::before{content:"";display:inline-block;width:8px;height:8px;border-radius:50%;background:#7c3aed;margin-right:6px}
       .current-badge::before{background:#176e82}
       .row.deleted{background:#b7443510;border-left:3px solid #b74435;padding-left:12px}.row.deleted time{color:#a63227;text-decoration:line-through}.deleted-badge{display:block;color:#a63227;font-size:12px;font-weight:700;margin-top:6px}.scroll.editing{max-height:620px}.history-editor.editing{border:2px solid #c65d00;border-radius:8px;padding:16px;margin:10px 0;background:var(--card-background-color,#fff)}.history-editor h3{grid-column:1/-1;font-size:15px;margin:0}.history-editor .actions{align-self:end}@media(max-width:580px){.history-editor .actions{grid-column:1/-1}}
@@ -461,6 +462,37 @@ export class ManualLocationAdmin extends HTMLElement {
     if (hint) hint.textContent = this._dirty || this._editing || this._editIndex >= 0 || Object.keys(this._removedCurrent).length
       ? "Najpierw zapisz lub odrzuć zmiany pozycji i historii, aby wybrać punkty szablonu."
       : "Zaznacz zapisane punkty z jednego dnia. Szablon zachowa ich godziny i sekundy; historię pozostawi bez zmian.";
+    this._drawHistorySelection();
+  }
+  _drawHistorySelection() {
+    this._historySelectionLayers?.clearLayers();
+    if (!this._map || !this._historySelection.size || !this._token || !this._hass?.user?.is_admin
+      || this._hass.connected === false || !this._hass.states[this._selected]) return;
+    const saved = new Set(this._savedHistoryPoints().map(templateKey)), places = new Map();
+    for (const { point, draft } of this._historyRows()) {
+      const key = templateKey(point);
+      if (draft || !this._historySelection.has(key) || !saved.has(key)) continue;
+      const place = JSON.stringify([point.latitude, point.longitude]);
+      if (!places.has(place)) places.set(place, []);
+      places.get(place).push(point);
+    }
+    if (!places.size) return;
+    this._historySelectionLayers ||= L.layerGroup().addTo(this._map);
+    for (const points of places.values()) {
+      points.sort((a, b) => Date.parse(b.timestamp) - Date.parse(a.timestamp));
+      const position = [points[0].latitude, points[0].longitude];
+      const title = points.length === 1 ? "Zaznaczono" : `Zaznaczono (${points.length})`;
+      const label = document.createElement("span");
+      label.textContent = `${title} · ${points.slice(0, 3).map((point) => new Date(point.timestamp).toLocaleTimeString()).join(" · ")}${points.length > 3 ? ` · +${points.length - 3} kolejnych (kliknij)` : ""}`;
+      const details = document.createElement("div"), heading = document.createElement("strong"), times = document.createElement("div");
+      heading.textContent = title; times.className = "history-selection-times";
+      for (const point of points) { const time = document.createElement("div"); time.textContent = new Date(point.timestamp).toLocaleString(); times.append(time); }
+      details.append(heading, times);
+      L.circleMarker(position, { radius: 14, color: "#fff", weight: 3, fill: false, interactive: false }).addTo(this._historySelectionLayers);
+      L.circleMarker(position, { radius: 11, color: "#172b4d", weight: 3, fillColor: "#ffd633", fillOpacity: 1, bubblingMouseEvents: false })
+        .bindTooltip(label, { permanent: true, direction: "top", offset: [0, -12], className: "history-selection-tooltip" })
+        .bindPopup(details).addTo(this._historySelectionLayers);
+    }
   }
   _createHistoryTemplate() {
     if (!this._historyTemplateAllowed() || !this._historySelection.size) return false;
@@ -658,7 +690,7 @@ export class ManualLocationAdmin extends HTMLElement {
   _drawPerson(fit = false) {
     this._layers.clearLayers();
     const person = this._person();
-    if (!person) { this._map.setView([25, 0], 2); return; }
+    if (!person) { this._drawHistorySelection(); this._map.setView([25, 0], 2); return; }
     const current = [person.current.latitude, person.current.longitude];
     const name = this._hass.states[this._selected]?.attributes.friendly_name || this._selected;
     const currentChanged = this._currentChanged();
@@ -668,6 +700,7 @@ export class ManualLocationAdmin extends HTMLElement {
     if (currentChanged && !person.current_history_timestamp) path.push(current);
     if (path.length > 1) L.polyline(path, { color: "#176e82", weight: 3 }).addTo(this._layers);
     for (const { point, draft, index } of this._historyRows().reverse()) if (index >= 0) L.circleMarker([point.latitude, point.longitude], { color: draft ? DRAFT_COLOR : "#ad6c34", radius: draft ? 6 : 4, fillOpacity: 1 }).bindPopup(popup(draft ? "Punkt historii · Niezapisane" : "Punkt historii", point)).addTo(this._layers);
+    this._drawHistorySelection();
     if (fit) this._map.fitBounds([current, ...path], { padding: [35, 35], maxZoom: 14 });
     this._previewEdit();
   }
