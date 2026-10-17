@@ -228,7 +228,10 @@ def validate_persons(hass, persons: object, previous: dict, now: datetime, *, ch
             or set(settings) not in (
                 {"enabled", "current", "history"},
                 {"enabled", "current", "history", "current_history_timestamp"},
+                {"enabled", "current", "history", "record_current_now"},
             )
+            # Persisted snapshots cannot request a new point during reload.
+            or ("record_current_now" in settings and (settings["record_current_now"] is not True or not check_entities))
             or type(settings["enabled"]) is not bool
             or not isinstance(settings["history"], list)
             or len(settings["history"]) > MAX_HISTORY
@@ -252,7 +255,10 @@ def validate_persons(hass, persons: object, previous: dict, now: datetime, *, ch
                 raise LocationError("invalid_input")
             # Consume the draft marker; only the validated historical point persists.
             current = deepcopy(selected)
-        elif old_current is not None and all(current[k] == old_current[k] for k in current):
+        elif (
+            not settings.get("record_current_now") and old_current is not None
+            and all(current[k] == old_current[k] for k in current)
+        ):
             current = deepcopy(old_current)
         else:
             if now in seen or len(history) >= MAX_HISTORY:

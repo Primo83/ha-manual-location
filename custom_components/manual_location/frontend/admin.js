@@ -1,8 +1,8 @@
-import { adminPersonOptions, callWS, editHistory, errorText, localDateInput, readPoint, removeHistory } from "./data.js?v=0.1.24";
-import { L, makeMap, mapStyles, popup } from "./map-common.js?v=0.1.24";
-import { registerReloadBlocker, startUpdateCheck } from "./updates.js?v=0.1.24";
-import "./scenarios.js?v=0.1.24";
-import "./place-search.js?v=0.1.24";
+import { adminPersonOptions, callWS, editHistory, errorText, localDateInput, readPoint, removeHistory } from "./data.js?v=0.1.25";
+import { L, makeMap, mapStyles, popup } from "./map-common.js?v=0.1.25";
+import { registerReloadBlocker, startUpdateCheck } from "./updates.js?v=0.1.25";
+import "./scenarios.js?v=0.1.25";
+import "./place-search.js?v=0.1.25";
 
 const DRAFT_COLOR = "#7c3aed";
 const EDIT_COLOR = "#c65d00";
@@ -899,11 +899,13 @@ export class ManualLocationAdmin extends HTMLElement {
     const { latitude, longitude, accuracy } = coords || {};
     if (!Number.isFinite(latitude) || Math.abs(latitude) > 90 || !Number.isFinite(longitude) || Math.abs(longitude) > 180
       || !Number.isFinite(accuracy) || accuracy < 0) throw new Error("Urządzenie zwróciło nieprawidłową lokalizację.");
-    const point = readPoint(latitude.toFixed(6), longitude.toFixed(6)), persons = structuredClone(snapshot.persons);
+    const point = { latitude: Number(latitude.toFixed(6)), longitude: Number(longitude.toFixed(6)) };
+    const persons = structuredClone(snapshot.persons);
     const old = persons[entityId];
     if (!old && Object.keys(persons).length >= 20) throw new Error("Osiągnięto limit 20 osób.");
-    persons[entityId] = editHistory(old || { enabled: true, current: point, history: [] }, point);
-    persons[entityId].current = { ...point }; persons[entityId].current_history_timestamp = point.timestamp;
+    if (old?.history.length >= 5000) throw new Error("Osiągnięto limit 5000 punktów.");
+    // HA supplies one timestamp for current and history, independently of the device clock.
+    persons[entityId] = { enabled: old?.enabled ?? true, current: point, history: old?.history || [], record_current_now: true };
     return persons;
   }
   _confirmQuickUpdate(nickname, request) {
