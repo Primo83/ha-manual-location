@@ -195,6 +195,27 @@ def coordinates(value: object) -> dict:
     return result
 
 
+def validate_quick_save(hass, value: object, *, check_entities=True) -> dict:
+    """Keep aliases separate from position/history and expose one chosen target."""
+    if (not isinstance(value, dict) or set(value) != {"nicknames", "entity_id"}
+            or not isinstance(value["nicknames"], dict) or len(value["nicknames"]) > MAX_PERSONS):
+        raise LocationError("invalid_input")
+    nicknames = {}
+    for entity_id, nickname in value["nicknames"].items():
+        if (not isinstance(entity_id, str) or not entity_id.startswith("person.")
+                or not isinstance(nickname, str) or not 1 <= len(nickname.strip()) <= 40
+                or any(unicodedata.category(char).startswith("C") for char in nickname)):
+            raise LocationError("invalid_input")
+        nicknames[entity_id] = nickname.strip()
+    target = value["entity_id"]
+    if target is not None and (
+        not isinstance(target, str) or not target.startswith("person.") or target not in nicknames
+        or (check_entities and hass.states.get(target) is None)
+    ):
+        raise LocationError("invalid_input")
+    return {"nicknames": nicknames, "entity_id": target}
+
+
 def validate_persons(hass, persons: object, previous: dict, now: datetime, *, check_entities=True) -> dict:
     """Normalize a complete snapshot and keep current independent of history."""
     if not isinstance(persons, dict) or len(persons) > MAX_PERSONS:
@@ -257,7 +278,8 @@ class ManualLocation:
         self.hass = hass
         self.entry = entry
         self.store = Store(hass, STORAGE_VERSION, DOMAIN, private=True, atomic_writes=True, serialize_in_event_loop=False)
-        self.data = {"revision": 0, "enabled": True, "persons": {}, "scenarios": {}}
+        self.data = {"revision": 0, "enabled": True, "persons": {}, "scenarios": {},
+                     "quick_save": {"nicknames": {}, "entity_id": None}}
         self.sessions: dict[str, Session] = {}
         self.failures: dict[str, list[float]] = {}
         self.blocked_until: dict[str, float] = {}
@@ -294,6 +316,8 @@ class ManualLocation:
             if (
                 not isinstance(stored, dict) or set(stored) not in (
                     {"revision", "enabled", "persons"}, {"revision", "enabled", "persons", "scenarios"},
+                    {"revision", "enabled", "persons", "quick_save"},
+                    {"revision", "enabled", "persons", "scenarios", "quick_save"},
                 )
                 or type(stored["revision"]) is not int or stored["revision"] < 0
                 or type(stored["enabled"]) is not bool or not isinstance(stored["persons"], dict)
@@ -309,6 +333,9 @@ class ManualLocation:
                     self.hass, stored["persons"], stored["persons"], now, check_entities=False
                 )
                 stored["scenarios"] = validate_scenarios(self.hass, stored.get("scenarios", {}))
+                stored["quick_save"] = validate_quick_save(
+                    self.hass, stored.get("quick_save", {"nicknames": {}, "entity_id": None}), check_entities=False,
+                )
             except (LocationError, KeyError, TypeError, ValueError, OverflowError):
                 raise LocationError("storage_error") from None
             if stored != original:
@@ -371,6 +398,17 @@ class ManualLocation:
         self.require_session(connection, token)
         return self._snapshot()
 
+    def quick_save_info(self, connection):
+        """Return only the chosen alias before PIN entry to an HA administrator."""
+        self._require_loaded()
+        if connection.user is None or not connection.user.is_admin:
+            raise LocationError("unauthorized")
+        settings = self.data["quick_save"]
+        target = settings["entity_id"]
+        nickname = settings["nicknames"].get(target, "")
+        configured = bool(target and nickname and self.hass.states.get(target) is not None)
+        return {"configured": configured, "nickname": nickname if configured else ""}
+
     def _snapshot(self):
         snapshot = deepcopy(self.data)
         # A failed disk cannot persist a stop. Report the local safety suspension
@@ -403,7 +441,7 @@ class ManualLocation:
         self._storage_attempts = 0
         self._suspended.clear()
 
-    async def async_save(self, connection, token, revision, enabled, persons):
+    async def async_save(self, connection, token, revision, enabled, persons, *, quick_save=_UNSET):
         async with self._save_lock:
             self.require_session(connection, token)
             if type(enabled) is not bool:
@@ -413,6 +451,7 @@ class ManualLocation:
                 "revision": revision + 1, "enabled": enabled,
                 "persons": validate_persons(self.hass, persons, self.data["persons"], datetime.now(UTC)),
                 "scenarios": deepcopy(self.data["scenarios"]),
+                "quick_save": deepcopy(self.data["quick_save"]) if quick_save is _UNSET else validate_quick_save(self.hass, quick_save),
             }
             for scenario in snapshot["scenarios"].values():
                 entity_id = scenario["entity_id"]

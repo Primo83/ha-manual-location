@@ -1,5 +1,5 @@
-import { callWS, coordinates, errorText } from "./data.js?v=0.1.23";
-import "./place-search.js?v=0.1.23";
+import { callWS, coordinates, errorText } from "./data.js?v=0.1.24";
+import "./place-search.js?v=0.1.24";
 
 const MODES = { walk: "Pieszo", drive: "Samochód", bicycle: "Rower", transit: "Komunikacja publiczna · szacunek" };
 const INTERVALS = [1, 5, 10, 15, 20, 30, 45, 60, 90, 120];

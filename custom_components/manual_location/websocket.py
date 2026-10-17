@@ -1,4 +1,4 @@
-"""WebSocket API; view and public version need no administrator PIN session."""
+"""WebSocket API with PIN-gated writes and minimal administrator alias discovery."""
 
 import logging
 
@@ -17,6 +17,7 @@ FIELDS = {
     "view": {"entity_ids", "start", "end"},
     "unlock": {"pin"},
     "admin_get": {"token"},
+    "quick_save_info": set(),
     "geocode": {"token", "query"},
     "route_resolve": {"token", "url"},
     "route_import": {"token", "points", "mode", "interval_minutes", "duration_minutes"},
@@ -48,6 +49,7 @@ async def async_handle_command(hass, connection, msg):
         # read-only and must never overwrite the server's authoritative plans.
         if operation == "admin_save":
             fields.discard("scenarios")
+            fields.discard("quick_save")
         if operation in {"scenario_save", "scenario_action"} and "scenario_id" not in fields:
             raise LocationError("client_outdated")
         # Older clients omit the optional upper bound and keep fixed intervals.
@@ -65,6 +67,8 @@ async def async_handle_command(hass, connection, msg):
             result = await coordinator.async_unlock(connection, msg["pin"])
         elif operation == "admin_get":
             result = coordinator.admin_get(connection, msg["token"])
+        elif operation == "quick_save_info":
+            result = coordinator.quick_save_info(connection)
         elif operation == "geocode":
             coordinator.require_session(connection, msg["token"])
             try:
@@ -90,7 +94,10 @@ async def async_handle_command(hass, connection, msg):
             finally:
                 authorize()
         elif operation == "admin_save":
-            result = await coordinator.async_save(connection, msg["token"], msg["revision"], msg["enabled"], msg["persons"])
+            result = await coordinator.async_save(
+                connection, msg["token"], msg["revision"], msg["enabled"], msg["persons"],
+                **({"quick_save": msg["quick_save"]} if "quick_save" in msg else {}),
+            )
         elif operation == "scenario_save":
             result = await coordinator.async_save_scenario(
                 connection, msg["token"], msg["revision"], msg["scenario_id"], msg["entity_id"], msg["day"], msg["name"], msg["points"],
