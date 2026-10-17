@@ -1,8 +1,8 @@
-import { adminPersonOptions, callWS, editHistory, errorText, localDateInput, readPoint, removeHistory } from "./data.js?v=0.1.21";
-import { L, makeMap, mapStyles, popup } from "./map-common.js?v=0.1.21";
-import { registerReloadBlocker, startUpdateCheck } from "./updates.js?v=0.1.21";
-import "./scenarios.js?v=0.1.21";
-import "./place-search.js?v=0.1.21";
+import { adminPersonOptions, callWS, editHistory, errorText, localDateInput, readPoint, removeHistory } from "./data.js?v=0.1.22";
+import { L, makeMap, mapStyles, popup } from "./map-common.js?v=0.1.22";
+import { registerReloadBlocker, startUpdateCheck } from "./updates.js?v=0.1.22";
+import "./scenarios.js?v=0.1.22";
+import "./place-search.js?v=0.1.22";
 
 const DRAFT_COLOR = "#7c3aed";
 const EDIT_COLOR = "#c65d00";
@@ -25,6 +25,7 @@ export class ManualLocationAdmin extends HTMLElement {
     this._historySelection = new Set();
     this._historySelectionGeneration = 0;
     this._historyChecks = [];
+    this._historyOlderCount = 0;
     this._scenarioDrafts = {};
     this._scenarioView = { selectedByEntity: {}, personFilter: "", statusFilter: "", nextLocal: 0 };
     const markEditing = (event) => {
@@ -102,6 +103,7 @@ export class ManualLocationAdmin extends HTMLElement {
     this._deletedHistory = {};
     this._editIndex = -1;
     this._busy = false;
+    this._historyOlderCount = 0;
     this._dirty = false;
     this._editing = false;
     this._scenarios = null;
@@ -188,8 +190,10 @@ export class ManualLocationAdmin extends HTMLElement {
     const token = this._token, epoch = this._epoch;
     try {
       const snapshot = await callWS(this._hass, { type: "manual_location/admin_get", token });
-      if (epoch === this._epoch && token === this._token && !this._busy && !this._scenarios?.busy && !this._hasDrafts()
-        && (snapshot.revision !== this._snapshot.revision || JSON.stringify(snapshot.scenarios) !== JSON.stringify(this._snapshot.scenarios))) this._acceptScenarioSnapshot(snapshot);
+      if (epoch === this._epoch && token === this._token && !this._busy && !this._scenarios?.busy && !this._hasDrafts()) {
+        if (snapshot.revision !== this._snapshot.revision || JSON.stringify(snapshot.scenarios) !== JSON.stringify(this._snapshot.scenarios)) this._acceptScenarioSnapshot(snapshot);
+        else if (this._historyWindowMinute !== Math.floor(Date.now() / 60000)) { this._refreshHistory(); this._drawPerson(); }
+      }
     } catch (error) {
       if (epoch !== this._epoch || token !== this._token) return;
       if (["invalid_token", "pin_required", "unauthorized", "forbidden"].includes(error?.code)) this._clearSession(errorText(error), true);
@@ -218,6 +222,7 @@ export class ManualLocationAdmin extends HTMLElement {
     if ((this._editing || this._editIndex >= 0) && !window.confirm("Zmienić osobę? Niezastosowane pola bieżącej pozycji i historii zostaną odrzucone. Przygotowane pozycje, historia i szkice planów pozostaną.")) { select.value = this._selected; return false; }
     this._clearHistorySelection(true);
     this._selected = entityId; select.value = entityId;
+    this._historyOlderCount = 0;
     this._editIndex = -1; this._editing = false; this._refreshPerson(); this._saveState();
     return true;
   }
@@ -240,7 +245,7 @@ export class ManualLocationAdmin extends HTMLElement {
       ${!admin ? '<section class="box lockbox"><h2>Ustawienia</h2><p class="sub">Zaloguj się na konto administratora Home Assistant.</p><div id="message" role="status" hidden></div></section>' : !unlocked ? '<section class="box lockbox"><h2>Odblokuj ustawienia</h2><div id="message" role="status" hidden></div><form id="unlock-form"><div class="field" style="margin-top:22px"><label for="pin">PIN administratora (4–12 znaków: litery A–Z, a–z lub cyfry)</label><input id="pin" type="password" pattern="[A-Za-z0-9]{4,12}" minlength="4" maxlength="12" autocomplete="one-time-code" data-1p-ignore autocapitalize="none" autocorrect="off" spellcheck="false" required></div><button class="primary wide" type="submit">Odblokuj</button></form></section>' : `
       <div class="layout"><aside class="sidebar"><section class="box"><h2>Ustawienia map</h2><label class="toggle"><input type="checkbox" id="global-enabled"><span>Włącz ręczne lokalizacje<small>Wyłączenie przywraca dane HA</small></span></label><div class="field" style="margin-top:24px"><label for="person">Osoba</label><select id="person"></select></div><label class="toggle"><input type="checkbox" id="person-enabled"><span>Włącz dla tej osoby</span></label><p class="notice">Nowa osoba jest włączona po ustawieniu pierwszej pozycji i zapisaniu zmian.</p><p class="notice" id="missing-person-notice" hidden>Tej osoby nie ma już w Home Assistant. Usuń jej ustawienia poniżej, a następnie zapisz wszystkie zmiany. Pozostałe osoby zachowają swoje ustawienia.</p><button class="wide danger" id="remove-person">Usuń ustawienia tej osoby</button></section>
       <section class="box"><h2>Bieżąca pozycja</h2><p class="current-summary" id="current-summary"></p><div class="field"><button class="wide" id="use-device-location">Użyj lokalizacji tego urządzenia</button><p class="sub">Jednorazowy odczyt z telefonu lub komputera, na którym otwarto panel. Wymaga zgody na lokalizację; dokładność zależy od urządzenia.</p></div><div class="pair"><div class="field"><label for="current-lat">Szerokość</label><input id="current-lat" type="number" step="any" min="-90" max="90"></div><div class="field"><label for="current-lon">Długość</label><input id="current-lon" type="number" step="any" min="-180" max="180"></div></div><button class="wide" id="set-current">Ustaw bieżącą pozycję</button><p class="sub">Każde ustawienie dodaje osobny szkic z godziną. Przed zapisem możesz zmienić jego czas i współrzędne albo go usunąć.</p></section></aside>
-      <section><div class="box mapbox"><manual-location-place-search id="admin-place-search"></manual-location-place-search><div class="map" id="map" aria-label="Mapa wyboru pozycji"></div><div class="caption">Kliknij mapę, aby uzupełnić współrzędne. Następnie ustaw pozycję lub dodaj punkt historii.</div><div class="map-edit-tools" id="map-edit-tools" hidden><p id="map-edit-status" role="status"></p><div class="actions"><button class="primary" id="apply-map-edit" type="submit" form="history-form">Zastosuj edycję</button><button id="cancel-map-edit" type="button">Anuluj edycję</button></div></div></div><section class="box history"><div class="history-top"><h2>Historia</h2><span class="eyebrow" id="count"></span></div><p class="sub">Od najnowszych do najstarszych. Fioletowe pozycje czekają na zapis.</p><div class="savebar"><button class="primary" id="save">Zapisz wszystkie zmiany</button><span id="save-state"></span><button id="reload">Wczytaj zapisane dane</button></div><div class="template-tools"><span id="history-selection-count" role="status"></span><button id="history-template" type="button">Utwórz szablon trasy</button><button id="history-selection-clear" type="button">Wyczyść zaznaczenie</button></div><p class="sub template-hint" id="history-template-hint"></p><div class="scroll" id="history-list"></div><div id="history-editor-home"><form id="history-form" class="history-editor"><h3 id="history-edit-title" hidden>Edycja punktu</h3><div class="field"><label for="history-lat">Szerokość</label><input id="history-lat" type="number" step="any" min="-90" max="90" required></div><div class="field"><label for="history-lon">Długość</label><input id="history-lon" type="number" step="any" min="-180" max="180" required></div><div class="field timefield"><label for="history-time">Lokalna data i godzina</label><input id="history-time" type="datetime-local" step="1" required></div><div class="actions"><button id="add-history" type="submit">Dodaj punkt</button><button id="cancel-edit" type="button" hidden>Anuluj edycję punktu</button></div></form></div></section></section></div>
+      <section><div class="box mapbox"><manual-location-place-search id="admin-place-search"></manual-location-place-search><div class="map" id="map" aria-label="Mapa wyboru pozycji"></div><div class="caption">Kliknij mapę, aby uzupełnić współrzędne. Następnie ustaw pozycję lub dodaj punkt historii.</div><div class="map-edit-tools" id="map-edit-tools" hidden><p id="map-edit-status" role="status"></p><div class="actions"><button class="primary" id="apply-map-edit" type="submit" form="history-form">Zastosuj edycję</button><button id="cancel-map-edit" type="button">Anuluj edycję</button></div></div></div><section class="box history"><div class="history-top"><h2>Historia</h2><span class="eyebrow" id="count"></span></div><p class="sub">Od najnowszych do najstarszych. Fioletowe pozycje czekają na zapis.</p><div class="template-tools"><span id="history-range" role="status"></span><button id="history-more" type="button">Pokaż starsze</button><button id="history-recent" type="button" hidden>Ostatnie 48 godzin</button></div><div class="savebar"><button class="primary" id="save">Zapisz wszystkie zmiany</button><span id="save-state"></span><button id="reload">Wczytaj zapisane dane</button></div><div class="template-tools"><span id="history-selection-count" role="status"></span><button id="history-template" type="button">Utwórz szablon trasy</button><button id="history-selection-clear" type="button">Wyczyść zaznaczenie</button></div><p class="sub template-hint" id="history-template-hint"></p><div class="scroll" id="history-list"></div><div id="history-editor-home"><form id="history-form" class="history-editor"><h3 id="history-edit-title" hidden>Edycja punktu</h3><div class="field"><label for="history-lat">Szerokość</label><input id="history-lat" type="number" step="any" min="-90" max="90" required></div><div class="field"><label for="history-lon">Długość</label><input id="history-lon" type="number" step="any" min="-180" max="180" required></div><div class="field timefield"><label for="history-time">Lokalna data i godzina</label><input id="history-time" type="datetime-local" step="1" required></div><div class="actions"><button id="add-history" type="submit">Dodaj punkt</button><button id="cancel-edit" type="button" hidden>Anuluj edycję punktu</button></div></form></div></section></section></div>
       <manual-location-scenarios></manual-location-scenarios>
       <details class="pin-change"><summary>Zmień PIN administratora</summary><form id="pin-form"><div class="field"><label for="new-pin">Nowy PIN (4–12 znaków: litery A–Z, a–z lub cyfry)</label><input id="new-pin" type="password" pattern="[A-Za-z0-9]{4,12}" minlength="4" maxlength="12" autocomplete="off" required></div><button type="submit">Zmień PIN i zablokuj sesje</button></form></details>`}</main>`;
     if (!admin) return;
@@ -316,6 +321,8 @@ export class ManualLocationAdmin extends HTMLElement {
     this.shadowRoot.querySelector("#reload").addEventListener("click", () => this._reload());
     this.shadowRoot.querySelector("#history-template").addEventListener("click", () => this._createHistoryTemplate());
     this.shadowRoot.querySelector("#history-selection-clear").addEventListener("click", () => this._clearHistorySelection());
+    this.shadowRoot.querySelector("#history-more").addEventListener("click", () => this._changeHistoryRange(false));
+    this.shadowRoot.querySelector("#history-recent").addEventListener("click", () => this._changeHistoryRange(true));
     this.shadowRoot.querySelector("#lock").addEventListener("click", () => this._lock());
     this.shadowRoot.querySelector("#pin-form").addEventListener("submit", (e) => { e.preventDefault(); this._changePin(); });
     this._refreshPerson();
@@ -334,6 +341,20 @@ export class ManualLocationAdmin extends HTMLElement {
       current: !!current && historyKey(point) === historyKey(current), draft: !saved.has(historyKey(point)) }));
     if (current && !rows.some((row) => row.current)) rows.push({ point: current, index: -1, current: true, draft: this._currentChanged() });
     return rows.sort((a, b) => Date.parse(b.point.timestamp) - Date.parse(a.point.timestamp));
+  }
+  _historyWindow(rows = this._historyRows()) {
+    const cutoff = Date.now() - 48 * 3600000;
+    const keep = (row) => row.current || row.draft || row.deleted || (row.index >= 0 && row.index === this._editIndex);
+    const older = rows.filter((row) => !keep(row) && Date.parse(row.point.timestamp) < cutoff);
+    const shown = new Set(older.slice(0, this._historyOlderCount));
+    return { rows: rows.filter((row) => keep(row) || Date.parse(row.point.timestamp) >= cutoff || shown.has(row)),
+      hidden: Math.max(0, older.length - this._historyOlderCount) };
+  }
+  _changeHistoryRange(recent) {
+    if (this._busy || this._scenarios?.busy) return;
+    this._historyOlderCount = recent ? 0 : this._historyOlderCount + 100;
+    this._refreshHistory();
+    this._drawPerson();
   }
   _syncCurrentDrafts() {
     const person = this._person();
@@ -517,15 +538,25 @@ export class ManualLocationAdmin extends HTMLElement {
     } catch (error) { this._message(error.message || errorText(error)); return false; }
   }
   _refreshHistory(focusPoint = null) {
+    this._historySelectionGeneration++;
     const live = this._historyRows(), saved = new Set(this._savedHistoryPoints().map(templateKey));
     const liveKeys = new Set(live.map((row) => deletedPointKey(row.point)));
     const removed = (this._deletedHistory[this._selected] || []).filter((point) => !liveKeys.has(deletedPointKey(point)));
-    const history = [...live, ...removed.map((point) => ({ point, index: -1, deleted: true }))]
-      .sort((a, b) => Date.parse(b.point.timestamp) - Date.parse(a.point.timestamp));
-    const eligible = new Set(live.filter((row) => !row.draft && saved.has(templateKey(row.point))).map((row) => templateKey(row.point)));
+    const window = this._historyWindow([...live, ...removed.map((point) => ({ point, index: -1, deleted: true }))]
+      .sort((a, b) => Date.parse(b.point.timestamp) - Date.parse(a.point.timestamp)));
+    const history = window.rows;
+    const eligible = new Set(history.filter((row) => !row.draft && !row.deleted && saved.has(templateKey(row.point))).map((row) => templateKey(row.point)));
     for (const key of this._historySelection) if (!eligible.has(key)) this._historySelection.delete(key);
     this._historyChecks = [];
-    this.shadowRoot.querySelector("#count").textContent = `${live.length} punktów${removed.length ? ` · ${removed.length} do usunięcia` : ""}`;
+    this.shadowRoot.querySelector("#count").textContent = `${history.length - removed.length} z ${live.length} punktów${removed.length ? ` · ${removed.length} do usunięcia` : ""}`;
+    this.shadowRoot.querySelector("#history-range").textContent = this._historyOlderCount
+      ? "Ostatnie 48 godzin i odsłonięte starsze wpisy. Bieżąca pozycja i niezapisane zmiany są zawsze widoczne."
+      : "Ostatnie 48 godzin. Bieżąca pozycja i niezapisane zmiany są zawsze widoczne.";
+    const more = this.shadowRoot.querySelector("#history-more");
+    more.hidden = !window.hidden;
+    more.textContent = `Pokaż starsze (${Math.min(100, window.hidden)})`;
+    this.shadowRoot.querySelector("#history-recent").hidden = !this._historyOlderCount;
+    this._historyWindowMinute = Math.floor(Date.now() / 60000);
     this.shadowRoot.querySelector("#add-history").textContent = this._editIndex < 0 ? "Dodaj punkt" : "Zastosuj edycję";
     this.shadowRoot.querySelector("#cancel-edit").hidden = this._editIndex < 0;
     const list = this.shadowRoot.querySelector("#history-list");
@@ -541,7 +572,7 @@ export class ManualLocationAdmin extends HTMLElement {
     if (!history.length) {
       const empty = document.createElement("div");
       empty.className = "empty";
-      empty.textContent = "Brak ręcznych punktów tej osoby.";
+      empty.textContent = live.length ? "Brak punktów w ostatnich 48 godzinach. Wybierz Pokaż starsze, aby zobaczyć wcześniejsze wpisy." : "Brak ręcznych punktów tej osoby.";
       list.append(empty);
     }
     this._previewEdit();
@@ -686,6 +717,7 @@ export class ManualLocationAdmin extends HTMLElement {
     this._refreshHistory();
     this._saveState();
     this._message("Edycja punktu anulowana.", true);
+    this._drawPerson();
   }
   _drawPerson(fit = false) {
     this._layers.clearLayers();
@@ -696,10 +728,11 @@ export class ManualLocationAdmin extends HTMLElement {
     const currentChanged = this._currentChanged();
     L.circleMarker(current, { color: currentChanged ? DRAFT_COLOR : "#176e82", radius: 9, fillOpacity: 1 })
       .bindPopup(popup(currentChanged ? `${name} · Niezapisane` : name, person.current)).addTo(this._layers);
-    const path = person.history.map((p) => [p.latitude, p.longitude]);
+    const rows = this._historyWindow().rows.reverse();
+    const path = rows.filter((row) => row.index >= 0).map(({ point }) => [point.latitude, point.longitude]);
     if (currentChanged && !person.current_history_timestamp) path.push(current);
     if (path.length > 1) L.polyline(path, { color: "#176e82", weight: 3 }).addTo(this._layers);
-    for (const { point, draft, index } of this._historyRows().reverse()) if (index >= 0) L.circleMarker([point.latitude, point.longitude], { color: draft ? DRAFT_COLOR : "#ad6c34", radius: draft ? 6 : 4, fillOpacity: 1 }).bindPopup(popup(draft ? "Punkt historii · Niezapisane" : "Punkt historii", point)).addTo(this._layers);
+    for (const { point, draft, index } of rows) if (index >= 0) L.circleMarker([point.latitude, point.longitude], { color: draft ? DRAFT_COLOR : "#ad6c34", radius: draft ? 6 : 4, fillOpacity: 1 }).bindPopup(popup(draft ? "Punkt historii · Niezapisane" : "Punkt historii", point)).addTo(this._layers);
     this._drawHistorySelection();
     if (fit) this._map.fitBounds([current, ...path], { padding: [35, 35], maxZoom: 14 });
     this._previewEdit();
@@ -841,6 +874,7 @@ export class ManualLocationAdmin extends HTMLElement {
     this._scenarioDrafts = {};
     this._scenarioView = { selectedByEntity: {}, personFilter: "", statusFilter: "", nextLocal: 0 };
     this._dirty = false; this._editing = false; this._editIndex = -1;
+    this._historyOlderCount = 0;
     this._clearHistorySelection(true);
     this._render();
     this._message("Wczytano zapisane dane.", true);

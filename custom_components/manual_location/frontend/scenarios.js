@@ -1,7 +1,7 @@
-import { callWS, coordinates, errorText } from "./data.js?v=0.1.21";
-import { L, makeMap, mapStyles, setMapHass } from "./map-common.js?v=0.1.21";
-import "./place-search.js?v=0.1.21";
-import "./route-import.js?v=0.1.21";
+import { callWS, coordinates, errorText } from "./data.js?v=0.1.22";
+import { L, makeMap, mapStyles, setMapHass } from "./map-common.js?v=0.1.22";
+import "./place-search.js?v=0.1.22";
+import "./route-import.js?v=0.1.22";
 
 const STATUS = { draft: "Przygotowany", running: "Uruchomiony", stopped: "Zatrzymany", completed: "Ukończony" };
 const REASON = { global_disabled: "Wyłączono ręczne lokalizacje.", person_missing: "Tej osoby nie ma w HA.",
