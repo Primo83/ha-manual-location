@@ -13,7 +13,7 @@ from aiohttp import ClientTimeout
 
 from homeassistant.helpers.aiohttp_client import async_get_clientsession
 
-from .coordinator import LocationError
+from .coordinator import LocationError, stop_label
 from .geocoding import API_KEY_OPTION, valid_api_key
 
 ENDPOINT = "https://api.geoapify.com/v1/routing"
@@ -138,7 +138,7 @@ def _distance(first, second):
     return 6371000 * 2 * math.asin(min(1, math.sqrt(a)))
 
 
-def sample_route(payload, interval_seconds, duration_seconds, expected_legs=None, *, interval_max_seconds=None):
+def sample_route(payload, interval_seconds, duration_seconds, expected_legs=None, *, interval_max_seconds=None, stop_labels=None):
     """Interpolate within each timed step, retaining slower/faster route parts."""
     try:
         if not isinstance(payload, dict) or payload.get("type") != "FeatureCollection" or len(payload["features"]) != 1:
@@ -153,8 +153,13 @@ def sample_route(payload, interval_seconds, duration_seconds, expected_legs=None
                 or properties.get("distance_units") != "meters" or not _number(distance, 0, 1000000000)
                 or not _number(provider_time, 0.001, 86400 * 31)):
             raise ValueError
+        if stop_labels is not None:
+            if not isinstance(stop_labels, list) or len(stop_labels) != len(legs) + 1:
+                raise ValueError
+            stop_labels = [stop_label(label) for label in stop_labels]
         segments = []
         elapsed = 0.0
+        stop_times = [0.0]
         previous = None
         vertex_count = 0
         for line, leg in zip(lines, legs, strict=True):
@@ -196,6 +201,7 @@ def sample_route(payload, interval_seconds, duration_seconds, expected_legs=None
             if cursor != len(line) - 1:
                 raise ValueError
             previous = line[-1]
+            stop_times.append(elapsed)
         if not segments or elapsed <= 0:
             raise ValueError
         # Minor provider rounding is expected; missing time coverage is not.
@@ -206,6 +212,11 @@ def sample_route(payload, interval_seconds, duration_seconds, expected_legs=None
             raise LocationError("route_duration_invalid")
         if interval_max_seconds is not None:
             duration = max(1, round(duration))
+        sampling_duration = duration
+        if interval_max_seconds is None and stop_labels is not None:
+            # Date timestamps have millisecond precision; keep the exact end
+            # representable before combining samples and mandatory stops.
+            duration = math.floor(duration * 1000) / 1000
         offsets = [0]
         while True:
             step = interval_seconds if interval_max_seconds is None else randint(interval_seconds, interval_max_seconds)
@@ -217,18 +228,40 @@ def sample_route(payload, interval_seconds, duration_seconds, expected_legs=None
             if len(offsets) >= MAX_POINTS:
                 raise LocationError("route_too_many_points")
         offsets.append(duration)
+        stops = {}
+        if stop_labels is not None:
+            positions = [lines[0][0], *(line[-1] for line in lines)]
+            for index, (seconds, label, position) in enumerate(zip(stop_times, stop_labels, positions, strict=True)):
+                if index == 0:
+                    offset = 0
+                elif index == len(stop_labels) - 1:
+                    offset = duration
+                else:
+                    offset = sampling_duration * seconds / elapsed
+                    offset = round(offset) if interval_max_seconds is not None else math.floor(offset * 1000) / 1000
+                if offset in stops:
+                    raise ValueError
+                stops[offset] = (label, position)
+            samples = set(offsets) if interval_max_seconds is not None else {
+                duration if offset == duration else math.floor(offset * 1000) / 1000 for offset in offsets
+            }
+            offsets = sorted(samples | stops.keys())
         if len(offsets) > MAX_POINTS:
             raise LocationError("route_too_many_points")
         ends = [item[1] for item in segments]
         points = []
         for offset in offsets:
-            at = elapsed * offset / duration
+            at = elapsed * offset / sampling_duration
             begin, end, first, last = segments[min(bisect_right(ends, at), len(segments) - 1)]
             fraction = min(1, max(0, (at - begin) / (end - begin)))
             longitude_delta = (last[0] - first[0] + 180) % 360 - 180
             longitude = (first[0] + longitude_delta * fraction + 180) % 360 - 180
-            points.append({"latitude": first[1] + (last[1] - first[1]) * fraction,
-                           "longitude": longitude, "offset_seconds": offset})
+            point = {"latitude": first[1] + (last[1] - first[1]) * fraction,
+                     "longitude": longitude, "offset_seconds": offset}
+            if offset in stops:
+                label, position = stops[offset]
+                point.update(latitude=position[1], longitude=position[0], stop=label)
+            points.append(point)
         # Preserve exact provider endpoints despite interpolation/rounding.
         points[0].update(latitude=lines[0][0][1], longitude=lines[0][0][0])
         points[-1].update(latitude=lines[-1][-1][1], longitude=lines[-1][-1][0])
@@ -317,11 +350,13 @@ class RouteImporter:
         self._check(options, authorize)
         if not isinstance(points, list) or not 2 <= len(points) <= MAX_STOPS or not isinstance(mode, str) or mode not in MODES:
             raise LocationError("invalid_input")
-        validated = []
-        for point in points:
-            if not isinstance(point, dict) or set(point) != {"latitude", "longitude"}:
+        validated, labels = [], []
+        for index, point in enumerate(points):
+            if not isinstance(point, dict) or set(point) not in ({"latitude", "longitude"}, {"latitude", "longitude", "stop"}):
                 raise LocationError("invalid_input")
             validated.append(_coordinates(point["latitude"], point["longitude"]))
+            fallback = "Początek" if index == 0 else "Cel" if index == len(points) - 1 else f"Przystanek {index}"
+            labels.append(stop_label(point["stop"]) if "stop" in point else fallback)
         if type(interval_minutes) is not int or not 1 <= interval_minutes <= 1440:
             raise LocationError("invalid_input")
         if interval_max_minutes is not None and (type(interval_max_minutes) is not int
@@ -348,6 +383,7 @@ class RouteImporter:
                     payload, interval_minutes * 60, None if duration_minutes is None else duration_minutes * 60,
                     len(validated) - 1,
                     interval_max_seconds=None if interval_max_minutes is None else interval_max_minutes * 60,
+                    stop_labels=labels,
                 )
                 budget = await self.geocoder.async_settle_route(
                     day, route_cost(len(validated), distance), options, authorize=authorize,

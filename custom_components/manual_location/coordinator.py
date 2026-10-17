@@ -8,6 +8,7 @@ import math
 import logging
 import secrets
 import time
+import unicodedata
 
 from homeassistant.auth.permissions.const import POLICY_READ
 from homeassistant.const import EVENT_HOMEASSISTANT_STARTED
@@ -23,6 +24,7 @@ from .const import (
 from .security import hash_pin, valid_pin, verify_pin
 
 _LOGGER = logging.getLogger(__name__)
+_UNSET = object()
 
 
 def scenario_day(value: object) -> str:
@@ -37,6 +39,28 @@ def scenario_day(value: object) -> str:
     return value
 
 
+def stop_label(value: object) -> str:
+    """Validate a planned stop without adding metadata to history/current."""
+    if (not isinstance(value, str) or not value.strip() or len(value) > 300
+            or any(unicodedata.category(char).startswith("C") for char in value)):
+        raise LocationError("invalid_input")
+    return value
+
+
+def scenario_routing(value: object) -> dict | None:
+    """Validate optional settings for the next route calculation."""
+    if value is None:
+        return None
+    if (not isinstance(value, dict)
+            or set(value) not in ({"mode", "interval_minutes"}, {"mode", "interval_minutes", "interval_max_minutes"})
+            or not isinstance(value["mode"], str) or value["mode"] not in {"walk", "drive", "bicycle", "transit"}
+            or type(value["interval_minutes"]) is not int or not 1 <= value["interval_minutes"] <= 1440
+            or ("interval_max_minutes" in value and (type(value["interval_max_minutes"]) is not int
+                or not value["interval_minutes"] <= value["interval_max_minutes"] <= 1440))):
+        raise LocationError("invalid_input")
+    return deepcopy(value)
+
+
 def scenario_points(hass, points: object, *, check_day=True, day=None, allow_empty=False) -> list[dict]:
     """Normalize a one-day plan in the configured Home Assistant timezone."""
     if not isinstance(points, list) or not (0 if allow_empty else 1) <= len(points) <= MAX_SCENARIO_POINTS:
@@ -46,7 +70,11 @@ def scenario_points(hass, points: object, *, check_day=True, day=None, allow_emp
         raise LocationError("invalid_input")
     result, instants, days = [], set(), set()
     for point in points:
-        normalized = coordinates(point)
+        if isinstance(point, dict) and "stop" in point:
+            normalized = coordinates({key: value for key, value in point.items() if key != "stop"})
+            normalized["stop"] = stop_label(point["stop"])
+        else:
+            normalized = coordinates(point)
         instant = timestamp(point.get("timestamp"))
         if instant in instants:
             raise LocationError("invalid_input")
@@ -101,7 +129,7 @@ def validate_scenarios(hass, scenarios: object) -> dict:
             key = f"legacy:{key}"
         if (
             not isinstance(key, str) or not 1 <= len(key) <= 120
-            or set(scenario) != new_fields
+            or set(scenario) not in (new_fields, new_fields | {"routing"})
             or not isinstance(scenario["entity_id"], str) or not scenario["entity_id"].startswith("person.")
             or not isinstance(scenario["name"], str) or not 1 <= len(scenario["name"].strip()) <= 80
             or scenario["status"] not in {"draft", "running", "stopped", "completed"}
@@ -110,6 +138,12 @@ def validate_scenarios(hass, scenarios: object) -> dict:
         ):
             raise LocationError("invalid_input")
         scenario_day(scenario["day"])
+        if "routing" in scenario:
+            routing = scenario_routing(scenario["routing"])
+            if routing is None:
+                del scenario["routing"]
+            else:
+                scenario["routing"] = routing
         # A timezone change must not invalidate a plan accepted in the old zone.
         points = scenario_points(hass, scenario["points"], check_day=False, allow_empty=True)
         cursor = scenario["cursor"]
@@ -391,7 +425,7 @@ class ManualLocation:
             self._reschedule()
             return self._snapshot()
 
-    async def async_save_scenario(self, connection, token, revision, scenario_id, entity_id, day, name, points):
+    async def async_save_scenario(self, connection, token, revision, scenario_id, entity_id, day, name, points, *, routing=_UNSET):
         async with self._save_lock:
             self.require_session(connection, token)
             self._require_revision(revision)
@@ -408,6 +442,11 @@ class ManualLocation:
                 raise LocationError("scenario_missing")
             if previous and previous["entity_id"] != entity_id:
                 raise LocationError("invalid_input")
+            if routing is _UNSET and previous and (
+                "routing" in previous or any("stop" in point for point in previous["points"])
+            ):
+                raise LocationError("client_outdated")
+            normalized_routing = None if routing is _UNSET else scenario_routing(routing)
             if previous is None and len(self.data["scenarios"]) >= MAX_SCENARIOS:
                 raise LocationError("scenario_limit")
             cursor = previous["cursor"] if previous else 0
@@ -430,6 +469,8 @@ class ManualLocation:
                 "entity_id": entity_id, "day": day, "name": name.strip(), "points": normalized,
                 "status": status, "cursor": cursor, "reason": reason,
             }
+            if normalized_routing is not None:
+                snapshot["scenarios"][scenario_id]["routing"] = normalized_routing
             if status == "running":
                 if cursor == len(normalized):
                     raise LocationError("no_pending_points")
@@ -479,7 +520,7 @@ class ManualLocation:
             for point in scenario["points"][scenario["cursor"]:]:
                 if timestamp(point["timestamp"]) > now:
                     break
-                due.append(deepcopy(point))
+                due.append({key: point[key] for key in ("latitude", "longitude", "timestamp")})
             if not due:
                 continue
             person = snapshot["persons"].setdefault(entity_id, {"enabled": True, "history": []})

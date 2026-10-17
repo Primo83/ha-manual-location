@@ -53,6 +53,8 @@ async def async_handle_command(hass, connection, msg):
         # Older clients omit the optional upper bound and keep fixed intervals.
         if operation == "route_import":
             fields.discard("interval_max_minutes")
+        if operation == "scenario_save":
+            fields.discard("routing")
         if fields != FIELDS[operation]:
             raise LocationError("invalid_input")
         if operation == "version":
@@ -92,6 +94,7 @@ async def async_handle_command(hass, connection, msg):
         elif operation == "scenario_save":
             result = await coordinator.async_save_scenario(
                 connection, msg["token"], msg["revision"], msg["scenario_id"], msg["entity_id"], msg["day"], msg["name"], msg["points"],
+                **({"routing": msg["routing"]} if "routing" in msg else {}),
             )
         elif operation == "scenario_action":
             result = await coordinator.async_scenario_action(

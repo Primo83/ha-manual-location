@@ -1,4 +1,4 @@
-import { callWS, coordinates, errorText } from "./data.js?v=0.1.22";
+import { callWS, coordinates, errorText } from "./data.js?v=0.1.23";
 
 const TYPES = { amenity: "Obiekt / miejsce", building: "Adres / budynek", street: "Ulica", suburb: "Dzielnica",
   district: "Dzielnica", postcode: "Kod pocztowy", city: "Miejscowość", county: "Powiat", state: "Region", country: "Kraj" };

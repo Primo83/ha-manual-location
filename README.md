@@ -132,6 +132,16 @@ Przy mapie kliknij **Zastosuj edycję**, aby przygotować zmianę, albo **Anuluj
 
 ## Wyznaczanie, import i zmiana czasu trasy
 
+### Przystanki pośrednie i przebudowa dalszej trasy
+
+W formularzu wyznaczania kliknij **Dodaj przystanek pośredni**. Wybierz każde miejsce z wyników wyszukiwania albo wskaż je na mapie. Środkowe miejsca możesz usuwać i przesuwać **W górę / W dół**; początek i cel pozostają końcami. Trasa prowadzi przez wszystkie przystanki w podanej kolejności. Każdy otrzymuje własny punkt z nazwą; pomiędzy nimi nadal powstają automatyczne pomiary, np. losowo9–15min. Obowiązkowy przystanek może skrócić odstęp pomiarów. Samo wskazanie miejsca nie dodaje czasu postoju; przerwę ustawisz przesunięciem dalszych godzin.
+
+W istniejącym planie wybierz **Przelicz od teraz** (od ostatniej wykonanej pozycji) albo **Przelicz odtąd** przy przyszłym punkcie. Przy odtąd dotychczasowy fragment do tego punktu włącznie zostaje zachowany. Formularz załaduje dalsze przystanki; dodaj lub przestaw miejsca, sprawdź transport i wyznacz podgląd. Początek przebudowy, dzień i jego czas są zablokowane. W trybie teraz godzina jest odświeżana podczas wyznaczania. Jeśli plan nie wykonał jeszcze punktu, użyj odtąd.
+
+Podgląd zmienia wyłącznie szkic tego samego planu. **Zapisz plan** zatwierdza dalszą trasę; działający scenariusz kontynuuje wykonanie, a wykonane punkty i historia pozostają bez zmian. Ukończony plan z dodaną dalszą częścią przechodzi do zatrzymanego i wymaga **Start**. **Anuluj przebudowę** odrzuca formularz miejsc, a **Odrzuć szkic planu** przywraca zapisany plan. Błąd wyznaczenia/zapisu zachowuje dotychczasową trasę. Jeśli w międzyczasie wykonano kolejny punkt, wczytaj aktualny plan i przelicz ponownie.
+
+Własny czas przy przebudowie oznacza czas **pozostałej części**, a nie całej poprzedniej podróży. Stare plany bez zapisanych ustawień wymagają ponownego wyboru transportu. Limit to12miejsc jednego wyznaczenia i500punktów całego planu, razem z zachowanym fragmentem; trasa nadal musi zmieścić się w jednym dniu HA.
+
 W **Plany i szkice → Wyznacz lub importuj trasę** wybierz **Wyznacz we wtyczce**. Wyszukaj początek i cel, a następnie jawnie wybierz właściwe miejsca z wyników. Wybrane miejsce możesz zmienić przed wyznaczeniem. Google Maps nie jest wymagane.
 
 Alternatywnie wybierz **Link Google Maps**, wklej link (także maps.app.goo.gl) i kliknij **Odczytaj link**. Sprawdź początek, cel i przystanki; przy samych nazwach wybierz dokładne wyniki. W obu trybach wybierz transport: pieszo, samochód, rower albo komunikację publiczną.
