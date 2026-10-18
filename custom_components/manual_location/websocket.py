@@ -11,6 +11,7 @@ from .const import DOMAIN
 from .coordinator import LocationError
 
 _LOGGER = logging.getLogger(__name__)
+_REFRESH_LOGGER = logging.getLogger(f"{__package__}.coordinator.location_refresh")
 
 FIELDS = {
     "version": set(),
@@ -59,6 +60,8 @@ async def async_handle_command(hass, connection, msg):
             fields.discard("interval_max_minutes")
         if operation == "scenario_save":
             fields.discard("routing")
+        if operation == "refresh_location":
+            fields.discard("wait_for_report")
         if fields != FIELDS[operation]:
             raise LocationError("invalid_input")
         if operation == "version":
@@ -72,7 +75,9 @@ async def async_handle_command(hass, connection, msg):
         elif operation == "quick_save_info":
             result = coordinator.quick_save_info(connection)
         elif operation == "refresh_location":
-            result = await coordinator.async_refresh_location(connection, msg["entity_id"])
+            result = await coordinator.async_refresh_location(
+                connection, msg["entity_id"], wait_for_report=msg.get("wait_for_report", False),
+            )
         elif operation == "geocode":
             coordinator.require_session(connection, msg["token"])
             try:
@@ -118,6 +123,8 @@ async def async_handle_command(hass, connection, msg):
             result = coordinator.lock(connection, msg["token"])
         connection.send_result(msg["id"], result)
     except LocationError as err:
+        if operation == "refresh_location" and connection.user is not None and connection.user.is_admin:
+            _REFRESH_LOGGER.info("Location refresh rejected: %s", err.code)
         connection.send_error(msg["id"], err.code, err.code)
     except Exception:  # Do not send payloads/exception text to HA's generic logger.
         _LOGGER.error("Manual Location command failed: %s", operation)

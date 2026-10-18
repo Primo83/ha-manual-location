@@ -1,6 +1,6 @@
-import { callWS, errorText, geoModels, historyOpacity, historyPoints, historySegments, originalIds, personModels, validateView, zoneModels } from "./data.js?v=0.1.29";
-import { L, makeMap, mapStyles, personIcon, popup, setMapHass } from "./map-common.js?v=0.1.29";
-import { startUpdateCheck } from "./updates.js?v=0.1.29";
+import { callWS, errorText, geoModels, historyOpacity, historyPoints, historySegments, originalIds, personModels, validateView, zoneModels } from "./data.js?v=0.1.30";
+import { L, makeMap, mapStyles, personIcon, popup, setMapHass } from "./map-common.js?v=0.1.30";
+import { startUpdateCheck } from "./updates.js?v=0.1.30";
 
 const COLORS = ["#186d83", "#b05631", "#644f9a", "#42754b", "#a2376b"];
 
@@ -200,14 +200,22 @@ export class ManualLocationMap extends HTMLElement {
     this._locationRequest = request;
     this._refreshNotice = "Sprawdzam aktualizację pozycji…";
     this._status(this._message || "");
+    request.timer = setTimeout(() => {
+      if (this._locationRequest === request) this._finishLocationRequest("Nie potwierdzono aktualizacji pozycji.");
+    }, 60000);
     try {
-      await callWS(this._hass, { type: "manual_location/refresh_location", entity_id: person.id });
-      if (request.epoch !== this._epoch || !this.isConnected) return;
-      request.accepted = true;
-      request.timer = setTimeout(() => this._finishLocationRequest("Brak nowszych danych."), 20000);
+      const result = await callWS(this._hass, {
+        type: "manual_location/refresh_location", entity_id: person.id, wait_for_report: true,
+      }, 65000);
+      if (this._locationRequest !== request || request.epoch !== this._epoch || !this.isConnected) return;
+      if (result?.reported === true) {
+        this._finishLocationRequest("Odebrano nowsze dane.");
+        this._refresh();
+        return;
+      }
       this._refresh();
     } catch (error) {
-      if (request.epoch !== this._epoch || !this.isConnected) return;
+      if (this._locationRequest !== request || request.epoch !== this._epoch || !this.isConnected) return;
       this._finishLocationRequest(error?.code === "refresh_limited" ? "Spróbuj ponownie za chwilę."
         : "Nie udało się sprawdzić aktualizacji pozycji.");
     }
@@ -317,7 +325,8 @@ export class ManualLocationMap extends HTMLElement {
       marker.bindPopup(popup(person.name, person.current, person.activity)).addTo(this._layers);
       this._attachHold(marker, person);
       const request = this._locationRequest;
-      if (request?.accepted && request.entityId === person.id && Date.parse(person.current.timestamp) > request.baseline) {
+      // A genuinely newer displayed point is fresh data even while the command waits.
+      if (request && request.entityId === person.id && Date.parse(person.current.timestamp) > request.baseline) {
         this._finishLocationRequest("Odebrano nowsze dane.");
       }
       bounds.push(current);

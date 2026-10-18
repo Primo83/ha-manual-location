@@ -164,7 +164,11 @@ W ustawieniach osoby nadaj **Pseudonim na ekranie PIN** i zaznacz **Szybki zapis
 
 Administrator może przytrzymać bieżącą ikonę osoby przez około 0,75 sekundy. Zwykły klik nadal pokazuje dymek z godziną. Wygląd i komunikaty ikon są jednakowe. Gdy osoba korzysta z systemowej lokalizacji, integracja prosi jej jednoznacznie przypisany telefon Companion o aktualizację. Przy aktywnej pozycji ręcznej sprawdza wyłącznie dane mapy, bez pobierania prawdziwego GPS ani zmiany zapisanej godziny.
 
-Jedna prośba na osobę i telefon na minutę zapobiega wielokrotnemu wywołaniu z różnych kart. „Odebrano nowsze dane” oznacza nowszy czas wyświetlanej pozycji; po 20 sekundach bez takiej zmiany pojawia się „Brak nowszych danych”. Telefon musi mieć dostęp do sieci oraz uprawnienia lokalizacji. Dostarczenie polecenia i nowy pomiar zależą od Androida i aplikacji. [Dokumentacja Companion](https://companion.home-assistant.io/docs/notifications/notification-commands/#request-location-updates).
+Jedna prośba na osobę i telefon na minutę zapobiega wielokrotnemu wywołaniu z różnych kart. Oczekiwanie trwa maksymalnie **60 sekund**. Integracja rozpoznaje rzeczywisty raport przypisanego telefonu również wtedy, gdy współrzędne i czas zmiany encji `person` pozostały identyczne. „Odebrano nowsze dane” potwierdza nowy raport lub nowsze dane mapy, nie gwarantuje wykonania osobnego pomiaru GPS na żądanie: w tym oknie może dotrzeć także raport automatyczny. Bez potwierdzenia pojawia się „Nie potwierdzono aktualizacji pozycji”. Po utracie połączenia oczekiwanie jest kończone; spóźniona odpowiedź nie zatwierdza kolejnej próby.
+
+Przytrzymanie nie zmienia sztucznie godziny `person` ani GPS i nie zapisuje historii, ustawień lub cache aktywności. Sam restart HA nie jest potwierdzeniem odebrania raportu. Telefon musi mieć dostęp do sieci i uprawnienia lokalizacji; opóźnienia dostarczania i pomiaru zależą od Androida oraz aplikacji. Funkcja nie wymaga włączania czujników aktywności i nie zmienia ich ustawień. [Dokumentacja Companion](https://companion.home-assistant.io/docs/notifications/notification-commands/#request-location-updates).
+
+Dla diagnostyki dedykowany logger `custom_components.manual_location.coordinator.location_refresh` zapisuje etapy operacji na poziomie INFO: losowy identyfikator, etap oraz czas trwania. Nie zapisuje współrzędnych, nazw i identyfikatorów osób lub telefonów, PIN-u, tokenów, webhooków ani treści raportów i wyjątków. Pozostałe loggery zachowują swoje ustawienia.
 
 ## Aktywność telefonu
 

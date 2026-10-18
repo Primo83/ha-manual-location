@@ -189,11 +189,11 @@ export function errorText(error) {
   return messages[code] || "Operacja nie powiodła się. Sprawdź dane i połączenie, a następnie spróbuj ponownie.";
 }
 
-export async function callWS(hass, request) {
+export async function callWS(hass, request, timeoutMs = 12000) {
   let timeout;
   try {
     return await Promise.race([hass.callWS(request), new Promise((_, reject) => {
-      timeout = setTimeout(() => reject(new Error("timeout")), 12000);
+      timeout = setTimeout(() => reject(new Error("timeout")), timeoutMs);
     })]);
   } finally { clearTimeout(timeout); }
 }

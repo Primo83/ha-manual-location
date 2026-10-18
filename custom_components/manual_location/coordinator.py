@@ -12,8 +12,9 @@ import unicodedata
 
 from homeassistant.auth.permissions.const import POLICY_READ
 from homeassistant.const import EVENT_HOMEASSISTANT_STARTED, STATE_UNAVAILABLE
-from homeassistant.core import Context, CoreState, valid_entity_id
+from homeassistant.core import Context, CoreState, callback, valid_entity_id
 from homeassistant.helpers import entity_registry as er
+from homeassistant.helpers.dispatcher import async_dispatcher_connect
 from homeassistant.helpers.event import async_track_point_in_utc_time, async_track_state_change_event
 from homeassistant.helpers.storage import Store
 from homeassistant.util import dt as dt_util
@@ -25,6 +26,9 @@ from .const import (
 from .security import hash_pin, valid_pin, verify_pin
 
 _LOGGER = logging.getLogger(__name__)
+_REFRESH_LOGGER = logging.getLogger(f"{__name__}.location_refresh")
+_REFRESH_LOGGER.setLevel(logging.INFO)
+LOCATION_REPORT_TIMEOUT = 60
 _UNSET = object()
 
 
@@ -304,6 +308,7 @@ class ManualLocation:
         self._phone_activity = None
         self._refresh_person_until: dict[str, float] = {}
         self._refresh_phone_until: dict[tuple[str, str], float] = {}
+        self._refresh_cleanups = {}
 
     @property
     def phone_activity(self):
@@ -431,13 +436,15 @@ class ManualLocation:
         configured = bool(target and nickname and self.hass.states.get(target) is not None)
         return {"configured": configured, "nickname": nickname if configured else ""}
 
-    async def async_refresh_location(self, connection, entity_id):
+    async def async_refresh_location(self, connection, entity_id, *, wait_for_report=False):
         """Check the current view or request one assigned Companion phone update."""
         self._require_loaded()
         user = connection.user
         if user is None or not user.is_admin:
             raise LocationError("unauthorized")
         if not isinstance(entity_id, str) or not entity_id.startswith("person.") or not valid_entity_id(entity_id):
+            raise LocationError("invalid_input")
+        if type(wait_for_report) is not bool:
             raise LocationError("invalid_input")
         if not user.permissions.check_entity(entity_id, POLICY_READ):
             raise LocationError("unauthorized")
@@ -448,11 +455,13 @@ class ManualLocation:
         if self._refresh_person_until.get(entity_id, 0) > now:
             raise LocationError("refresh_limited")
         manual = self.data["persons"].get(entity_id)
-        if self.data["enabled"] and manual and manual["enabled"]:
+        manual_active = self.data["enabled"] and manual and manual["enabled"]
+        if manual_active:
             self._refresh_person_until[entity_id] = now + 60
-            return {}
+            if not wait_for_report:
+                return {}
         trackers = state.attributes.get("device_trackers")
-        if not isinstance(trackers, (list, tuple)) or not self.hass.services.has_service("notify", "send_message"):
+        if not manual_active and (not isinstance(trackers, (list, tuple)) or not self.hass.services.has_service("notify", "send_message")):
             raise LocationError("refresh_unavailable")
         registry = er.async_get(self.hass)
 
@@ -478,27 +487,116 @@ class ManualLocation:
                 raise LocationError("refresh_unavailable")
             return (targets[0], (tracker.config_entry_id, tracker.device_id)) if targets else None
 
-        current = state.attributes.get("source")
-        resolved = notify_for(current) if current in trackers else None
-        if resolved is None:
-            targets = {candidate for tracker in trackers if (candidate := notify_for(tracker)) is not None}
-            if len(targets) != 1:
+        def current_binding():
+            self._require_loaded()
+            if (connection.user is not user or not user.is_admin
+                    or not user.permissions.check_entity(entity_id, POLICY_READ)):
+                raise LocationError("unauthorized")
+            current_state = self.hass.states.get(entity_id)
+            if current_state is None or current_state.state == STATE_UNAVAILABLE:
                 raise LocationError("refresh_unavailable")
-            resolved = targets.pop()
-        target, phone_key = resolved
-        if self._refresh_phone_until.get(phone_key, 0) > now:
-            raise LocationError("refresh_limited")
-        # Reserve both limits before the first await, including failed sends.
-        self._refresh_person_until[entity_id] = now + 60
-        self._refresh_phone_until[phone_key] = now + 60
+            override = self.data["persons"].get(entity_id)
+            if self.data["enabled"] and override and override["enabled"]:
+                return None
+            assigned = current_state.attributes.get("device_trackers")
+            if not isinstance(assigned, (list, tuple)):
+                raise LocationError("refresh_unavailable")
+            current = current_state.attributes.get("source")
+            binding = notify_for(current) if current in assigned else None
+            if binding is None:
+                targets = {candidate for tracker in assigned if (candidate := notify_for(tracker)) is not None}
+                if len(targets) != 1:
+                    raise LocationError("refresh_unavailable")
+                binding = targets.pop()
+            return binding
+
+        resolved = current_binding()
+        if resolved is not None:
+            target, phone_key = resolved
+            if self._refresh_phone_until.get(phone_key, 0) > now:
+                raise LocationError("refresh_limited")
+            # Reserve both limits before the first await, including failed sends.
+            self._refresh_person_until[entity_id] = now + 60
+            self._refresh_phone_until[phone_key] = now + 60
+
+        operation_id = secrets.token_hex(4)
+        def stage(name):
+            try:
+                _REFRESH_LOGGER.info("Location refresh %s: %s (%.1fs)", operation_id, name, time.monotonic() - now)
+            except Exception:
+                # Diagnostics must not break delivery or escape a native callback.
+                pass
+
+        report = self.hass.loop.create_future() if wait_for_report else None
+        unsubscribe = None
+        task = asyncio.current_task()
+        def cleanup():
+            nonlocal unsubscribe
+            if unsubscribe is not None:
+                unsubscribe()
+                unsubscribe = None
+            if report is not None and not report.done():
+                report.cancel()
+
+        if wait_for_report:
+            self._refresh_cleanups[task] = cleanup
+            if resolved is not None:
+                @callback
+                def receive_report(_data):
+                    try:
+                        if report.done():
+                            return
+                        binding = current_binding()
+                        if binding is None or binding[1] != phone_key:
+                            return
+                        # The native webhook is a receipt, even if GPS is unchanged.
+                        stage("report_received")
+                        report.set_result(True)
+                    except LocationError:
+                        return
+                    except Exception:
+                        # HA dispatcher otherwise includes its arguments (GPS) in errors.
+                        stage("report_check_failed")
+
+                # Native Companion protocol; importing mobile_app loads unrelated integrations.
+                unsubscribe = async_dispatcher_connect(
+                    self.hass, f"mobile_app_location_update_{phone_key[0]}", receive_report,
+                )
         try:
-            await self.hass.services.async_call(
-                "notify", "send_message", {"message": "request_location_update"},
-                target={"entity_id": target}, blocking=True, context=Context(user_id=user.id),
-            )
+            async with asyncio.timeout(LOCATION_REPORT_TIMEOUT if wait_for_report else 12):
+                if resolved is not None:
+                    stage("sending")
+                    await self.hass.services.async_call(
+                        "notify", "send_message", {"message": "request_location_update"},
+                        target={"entity_id": target}, blocking=True, context=Context(user_id=user.id),
+                    )
+                    stage("accepted")
+                else:
+                    stage("checking")
+                if not wait_for_report:
+                    return {}
+                await report
+                binding = current_binding()
+                if binding is None or binding[1] != phone_key:
+                    raise LocationError("refresh_unavailable")
+                return {"reported": True}
+        except TimeoutError:
+            stage("no_report")
+            if not wait_for_report:
+                raise LocationError("refresh_failed") from None
+            return {"reported": False}
+        except asyncio.CancelledError:
+            stage("cancelled")
+            raise
+        except LocationError:
+            stage("access_or_assignment_changed")
+            raise
         except Exception:
+            stage("send_failed")
             raise LocationError("refresh_failed") from None
-        return {}
+        finally:
+            cleanup()
+            self._refresh_cleanups.pop(task, None)
 
     def _snapshot(self):
         snapshot = deepcopy(self.data)
@@ -713,6 +811,7 @@ class ManualLocation:
     async def async_start(self):
         """Begin restored plans only after integration and HA startup are complete."""
         self._started = True
+        _REFRESH_LOGGER.info("Location refresh diagnostics ready")
         self.phone_activity.start()
         if self.hass.state == CoreState.running:
             await self._async_run_due(datetime.now(UTC))
@@ -786,6 +885,10 @@ class ManualLocation:
     async def async_shutdown(self):
         """Cancel timers/listeners and drain the one writer before unloading."""
         self.loaded = False
+        for task, cleanup in list(self._refresh_cleanups.items()):
+            cleanup()
+            task.cancel()
+        self._refresh_cleanups.clear()
         if self._phone_activity is not None:
             await self.phone_activity.async_shutdown()
         for name in ("_timer_cancel", "_state_cancel", "_startup_cancel"):
