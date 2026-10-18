@@ -60,7 +60,8 @@ export function personModels(states, entityIds, view, originals, start, end) {
     const state = states[id];
     if (!state) return [];
     const override = view.overrides[id];
-    const current = override ? coordinates(override.current) : coordinates(state.attributes);
+    const current = override ? coordinates(override.current)
+      : coordinates({ ...state.attributes, timestamp: state.last_updated || state.last_changed });
     if (!current) return [];
     const points = override ? override.history : (originals[id] || []);
     // Copy only identity fields. State/zone/gps_accuracy could disclose the original location.
