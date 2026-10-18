@@ -44,6 +44,16 @@ Po instalacji sprawdź zapis pozycji, dodawanie i usuwanie historii, przełączn
 
 Kafelki OpenStreetMap są pobierane przez oficjalny mechanizm Map tiles Home Assistanta, bez dodatkowego klucza API do ustawienia. Dostawca otrzymuje żądania dotyczące oglądanego obszaru. Biblioteka Leaflet jest dołączona lokalnie, a mapa wymaga dostępu do kafelków.
 
+## Źródło lokalizacji każdej osoby
+
+Po odblokowaniu panelu podsumowanie pokazuje każdą osobę i jej **zapisane źródło lokalizacji**. Kliknięcie osoby wybiera jej ustawienia. Osobny opis **Po zapisie** pokazuje przygotowaną zmianę; mapy przełączą źródło dopiero po **Zapisz wszystkie zmiany**, dostępnym nad formularzem.
+
+W ustawieniach wybranej osoby wybierz **Home Assistant** albo **Ręczna (custom)**. Home Assistant przywraca dane HA, zachowując ręczną pozycję i historię do ponownego użycia. Osoba bez ręcznej pozycji korzysta z HA; najpierw przygotuj pierwszy punkt, aby włączyć dla niej źródło ręczne. Jawne ustawienie pierwszego punktu tworzy włączony ręczny szkic, wymagający wspólnego zapisu.
+
+Przełącznik globalny dotyczy **wszystkich osób**. Jego wyłączenie oznacza źródło HA na mapach, także gdy indywidualnie wybrano ręczną lokalizację. Podsumowanie uwzględnia tę zależność i odróżnia zapisany stan od szkicu. Sam wybór osoby nie tworzy ustawień ani niezapisanych zmian.
+
+Sekcja **Aktywność telefonu** jest podpisana imieniem wybranej osoby i działa niezależnie od źródła lokalizacji. Jednakowe domyślne zaznaczenia sygnałów u dwóch osób są prawidłowe; późniejsze zmiany i przywrócenie domyślnych dotyczą tylko wybranej osoby. Szczegóły źródła są widoczne w panelu administratora, a obie karty mapy zachowują jednakowy neutralny wygląd ikon i dymków.
+
 ## Aktualizacje z main
 
 To repozytorium dystrybucyjne nie publikuje GitHub Releases. HACS korzysta z domyślnej gałęzi **main** i identyfikuje aktualizacje po commitach. Nowe pliki trafiają tutaj po przejściu testów. [Zasady HACS](https://www.hacs.dev/docs/publish/integration/).
