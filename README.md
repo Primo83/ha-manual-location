@@ -2,7 +2,7 @@
 
 Ręczne pozycje i historia osób na wybranych kartach mapy Home Assistanta. Administrator zarządza nimi we wspólnym panelu **Ustawienia mapy**, chronionym uprawnieniami administratora HA i dodatkowym PIN-em.
 
-Integracja zmienia prezentację w kartach `custom:manual-location-map`. Nie zmienia encji `person`, GPS z telefonów, automatyzacji ani historii Recorder. Inne ekrany i API Home Assistanta mogą nadal pokazywać oryginalne dane. PIN nie chroni przed właścicielem serwera z dostępem do plików lub kodu.
+Integracja zmienia prezentację w kartach `custom:manual-location-map`. Ręczne pozycje nie zmieniają encji `person`, GPS z telefonów, automatyzacji ani historii Recorder. Osobne przytrzymanie systemowej ikony przez administratora może poprosić przypisany telefon Companion o nową lokalizację, która trafia zwykłą drogą do HA. Inne ekrany i API Home Assistanta mogą nadal pokazywać oryginalne dane. PIN nie chroni przed właścicielem serwera z dostępem do plików lub kodu.
 
 ## Instalacja przez HACS
 
@@ -159,3 +159,9 @@ Oczekujące punkty możesz zmieniać także podczas działania trasy, bez Stop i
 Opcja **Pobierz GPS i zapisz pozycję** pod przyciskiem lokalizacji urządzenia wykonuje odczyt i zapis bieżącej pozycji oraz punktu historii jednym kliknięciem. Najpierw zapisz lub odrzuć inne zmiany. Dopiero potwierdzony zapis zmienia widok; chmurka wyniku jest widoczna bez przewijania. Przy braku potwierdzenia wczytaj zapisane dane przed ponowną próbą. Ręczna zmiana zatrzymuje aktywny plan tej osoby.
 
 W ustawieniach osoby nadaj **Pseudonim na ekranie PIN** i zaznacz **Szybki zapis na ekranie PIN dla tej osoby**, a następnie zapisz zmiany. Przypisanie jest wspólne dla urządzeń. Na ekranie PIN pojawi się wyłącznie pseudonim oraz neutralny przycisk **Aktualizuj**. Wpisz PIN i kliknij Aktualizuj: po sprawdzeniu PIN-u potwierdź akcję; lokalizacja zapisze się dla przypisanej osoby bez otwierania dashboardu. Jednorazowa sesja zostaje zamknięta, a chmurka pokazuje neutralny wynik. Pseudonim zmienia podpis, nie uprawnienia administratora HA ani dostęp przez API.
+
+## Sprawdzenie aktualizacji pozycji
+
+Administrator może przytrzymać bieżącą ikonę osoby przez około 0,75 sekundy. Zwykły klik nadal pokazuje dymek z godziną. Wygląd i komunikaty ikon są jednakowe. Gdy osoba korzysta z systemowej lokalizacji, integracja prosi jej jednoznacznie przypisany telefon Companion o aktualizację. Przy aktywnej pozycji ręcznej sprawdza wyłącznie dane mapy, bez pobierania prawdziwego GPS ani zmiany zapisanej godziny.
+
+Jedna prośba na osobę i telefon na minutę zapobiega wielokrotnemu wywołaniu z różnych kart. „Odebrano nowsze dane” oznacza nowszy czas wyświetlanej pozycji; po 20 sekundach bez takiej zmiany pojawia się „Brak nowszych danych”. Telefon musi mieć dostęp do sieci oraz uprawnienia lokalizacji. Dostarczenie polecenia i nowy pomiar zależą od Androida i aplikacji. [Dokumentacja Companion](https://companion.home-assistant.io/docs/notifications/notification-commands/#request-location-updates).

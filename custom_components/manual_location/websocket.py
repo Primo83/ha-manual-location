@@ -18,6 +18,7 @@ FIELDS = {
     "unlock": {"pin"},
     "admin_get": {"token"},
     "quick_save_info": set(),
+    "refresh_location": {"entity_id"},
     "geocode": {"token", "query"},
     "route_resolve": {"token", "url"},
     "route_import": {"token", "points", "mode", "interval_minutes", "duration_minutes"},
@@ -69,6 +70,8 @@ async def async_handle_command(hass, connection, msg):
             result = coordinator.admin_get(connection, msg["token"])
         elif operation == "quick_save_info":
             result = coordinator.quick_save_info(connection)
+        elif operation == "refresh_location":
+            result = await coordinator.async_refresh_location(connection, msg["entity_id"])
         elif operation == "geocode":
             coordinator.require_session(connection, msg["token"])
             try:

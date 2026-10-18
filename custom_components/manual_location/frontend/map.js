@@ -1,6 +1,6 @@
-import { callWS, errorText, geoModels, historyOpacity, historyPoints, historySegments, originalIds, personModels, validateView, zoneModels } from "./data.js?v=0.1.26";
-import { L, makeMap, mapStyles, personIcon, popup, setMapHass } from "./map-common.js?v=0.1.26";
-import { startUpdateCheck } from "./updates.js?v=0.1.26";
+import { callWS, errorText, geoModels, historyOpacity, historyPoints, historySegments, originalIds, personModels, validateView, zoneModels } from "./data.js?v=0.1.27";
+import { L, makeMap, mapStyles, personIcon, popup, setMapHass } from "./map-common.js?v=0.1.27";
+import { startUpdateCheck } from "./updates.js?v=0.1.27";
 
 const COLORS = ["#186d83", "#b05631", "#644f9a", "#42754b", "#a2376b"];
 
@@ -12,6 +12,10 @@ export class ManualLocationMap extends HTMLElement {
     this._originals = {};
     this._manualView = false;
     this._onMapInput = (event) => {
+      if (this._hold && ((event.type === "pointerdown" && event.pointerId !== this._hold.pointerId)
+        || (event.type === "touchstart" && event.touches?.length > 1)
+        || ["wheel", "keydown", "dragstart", "zoomstart"].includes(event.type))) this._cancelHold();
+      if (event.type === "zoomstart") return;
       if (event.type === "keydown" && !["ArrowUp", "ArrowDown", "ArrowLeft", "ArrowRight", "+", "-", "=", "_"].includes(event.key)) return;
       if (this._view) this._manualView = true;
     };
@@ -51,7 +55,8 @@ export class ManualLocationMap extends HTMLElement {
 
   set hass(hass) {
     const sameUser = Boolean(hass.user?.id) && this._hass?.user?.id === hass.user.id;
-    const changed = this._hass?.connection !== hass.connection || this._hass?.user?.id !== hass.user?.id;
+    const changed = this._hass?.connection !== hass.connection || this._hass?.user?.id !== hass.user?.id
+      || this._hass?.user?.is_admin !== hass.user?.is_admin;
     const disconnected = hass.connected === false && this._hass?.connected !== false;
     this._hass = hass;
     setMapHass(this._map, hass);
@@ -82,7 +87,7 @@ export class ManualLocationMap extends HTMLElement {
     this._invalidate("Łączenie…");
     const container = this._map?.getContainer();
     for (const event of ["pointerdown", "touchstart", "wheel", "keydown"]) container?.removeEventListener(event, this._onMapInput, true);
-    this._map?.off("dragstart", this._onMapInput);
+    this._map?.off("dragstart zoomstart", this._onMapInput);
     this._map?.remove();
     this._map = null;
     this.shadowRoot.replaceChildren();
@@ -110,6 +115,11 @@ export class ManualLocationMap extends HTMLElement {
       this._restoreView = { center: this._map.getCenter(), zoom: this._map.getZoom() };
     }
     this._epoch++;
+    this._clearMarkerHolds();
+    clearTimeout(this._locationRequest?.timer);
+    clearTimeout(this._noticeTimer);
+    this._locationRequest = null;
+    this._refreshNotice = "";
     this._busy = false;
     this._view = null;
     this._originals = {};
@@ -122,7 +132,85 @@ export class ManualLocationMap extends HTMLElement {
 
   _status(message) {
     this._message = message;
-    if (this._statusEl) { this._statusEl.textContent = message; this._statusEl.hidden = !message; }
+    const visible = message || this._refreshNotice || "";
+    if (this._statusEl) { this._statusEl.textContent = visible; this._statusEl.hidden = !visible; }
+  }
+
+  _cancelHold() {
+    clearTimeout(this._hold?.timer);
+    this._hold = null;
+  }
+
+  _clearMarkerHolds() {
+    this._cancelHold();
+    for (const remove of this._markerHoldListeners || []) remove();
+    this._markerHoldListeners = [];
+  }
+
+  _attachHold(marker, person) {
+    if (!this._hass.user?.is_admin) return;
+    const element = marker.getElement();
+    if (!element) return;
+    let suppressClick = false;
+    const listen = (name, handler) => {
+      element.addEventListener(name, handler, true);
+      this._markerHoldListeners.push(() => element.removeEventListener(name, handler, true));
+    };
+    listen("pointerdown", (event) => {
+      suppressClick = false;
+      if (!event.isPrimary || event.button !== 0) { this._cancelHold(); return; }
+      if (this._locationRequest || this._hold) return;
+      const hold = { element, pointerId: event.pointerId, x: event.clientX, y: event.clientY };
+      this._hold = hold;
+      hold.timer = setTimeout(() => {
+        if (this._hold !== hold) return;
+        suppressClick = true;
+        this._requestLocation(person);
+      }, 750);
+    });
+    listen("pointermove", (event) => {
+      const hold = this._hold;
+      if (hold?.element === element && event.pointerId === hold.pointerId
+        && Math.hypot(event.clientX - hold.x, event.clientY - hold.y) > 10) this._cancelHold();
+    });
+    for (const name of ["pointerup", "pointercancel", "pointerleave"]) listen(name, (event) => {
+      if (this._hold?.element === element && event.pointerId === this._hold.pointerId) this._cancelHold();
+    });
+    listen("click", (event) => {
+      if (suppressClick) { event.preventDefault(); event.stopImmediatePropagation(); suppressClick = false; }
+    });
+    listen("contextmenu", (event) => {
+      if (suppressClick || this._hold?.element === element) { event.preventDefault(); event.stopImmediatePropagation(); }
+    });
+  }
+
+  _finishLocationRequest(message) {
+    clearTimeout(this._locationRequest?.timer);
+    this._locationRequest = null;
+    this._refreshNotice = message;
+    this._status(this._message || "");
+    this._noticeTimer = setTimeout(() => { this._refreshNotice = ""; this._status(this._message || ""); }, 6000);
+  }
+
+  async _requestLocation(person) {
+    if (this._locationRequest || !this.isConnected || !this._hass.user?.is_admin) return;
+    clearTimeout(this._noticeTimer);
+    const parsed = Date.parse(person.current.timestamp);
+    const request = { entityId: person.id, baseline: Number.isFinite(parsed) ? parsed : Date.now(), epoch: this._epoch };
+    this._locationRequest = request;
+    this._refreshNotice = "Sprawdzam aktualizację pozycji…";
+    this._status(this._message || "");
+    try {
+      await callWS(this._hass, { type: "manual_location/refresh_location", entity_id: person.id });
+      if (request.epoch !== this._epoch || !this.isConnected) return;
+      request.accepted = true;
+      request.timer = setTimeout(() => this._finishLocationRequest("Brak nowszych danych."), 20000);
+      this._refresh();
+    } catch (error) {
+      if (request.epoch !== this._epoch || !this.isConnected) return;
+      this._finishLocationRequest(error?.code === "refresh_limited" ? "Spróbuj ponownie za chwilę."
+        : "Nie udało się sprawdzić aktualizacji pozycji.");
+    }
   }
 
   _ensureMap() {
@@ -139,7 +227,7 @@ export class ManualLocationMap extends HTMLElement {
     this._layers = L.layerGroup().addTo(this._map);
     const container = this._map.getContainer();
     for (const event of ["pointerdown", "touchstart", "wheel", "keydown"]) container.addEventListener(event, this._onMapInput, { capture: true, passive: true });
-    this._map.on("dragstart", this._onMapInput);
+    this._map.on("dragstart zoomstart", this._onMapInput);
     const fit = L.control({ position: "topleft" });
     fit.onAdd = () => {
       const button = document.createElement("button");
@@ -169,7 +257,7 @@ export class ManualLocationMap extends HTMLElement {
   }
 
   async _refresh() {
-    if (!this.isConnected || !this._hass || !this._config || this._busy || this._hass.connected === false) return;
+    if (!this.isConnected || !this._hass || !this._config || this._busy || this._hold || this._hass.connected === false) return;
     this._ensureMap();
     const epoch = this._epoch;
     this._busy = true;
@@ -211,7 +299,8 @@ export class ManualLocationMap extends HTMLElement {
   }
 
   _render(start, end) {
-    if (!this._map || !this._view) return;
+    if (!this._map || !this._view || this._hold) return;
+    this._clearMarkerHolds();
     this._layers.clearLayers();
     const bounds = [];
     const states = this._hass.states;
@@ -226,6 +315,11 @@ export class ManualLocationMap extends HTMLElement {
       const current = [person.current.latitude, person.current.longitude];
       const marker = L.marker(current, { icon: personIcon(person.name, person.picture, color), title: person.name, bubblingMouseEvents: false });
       marker.bindPopup(popup(person.name, person.current)).addTo(this._layers);
+      this._attachHold(marker, person);
+      const request = this._locationRequest;
+      if (request?.accepted && request.entityId === person.id && Date.parse(person.current.timestamp) > request.baseline) {
+        this._finishLocationRequest("Odebrano nowsze dane.");
+      }
       bounds.push(current);
       if (this._config.hours_to_show > 0 && person.history.length) {
         const path = person.history.map((p) => [p.latitude, p.longitude]);

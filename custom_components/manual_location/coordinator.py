@@ -11,8 +11,9 @@ import time
 import unicodedata
 
 from homeassistant.auth.permissions.const import POLICY_READ
-from homeassistant.const import EVENT_HOMEASSISTANT_STARTED
-from homeassistant.core import CoreState
+from homeassistant.const import EVENT_HOMEASSISTANT_STARTED, STATE_UNAVAILABLE
+from homeassistant.core import Context, CoreState, valid_entity_id
+from homeassistant.helpers import entity_registry as er
 from homeassistant.helpers.event import async_track_point_in_utc_time, async_track_state_change_event
 from homeassistant.helpers.storage import Store
 from homeassistant.util import dt as dt_util
@@ -300,6 +301,8 @@ class ManualLocation:
         self._storage_attempts = 0
         self._suspended = set()
         self._geocoder = None
+        self._refresh_person_until: dict[str, float] = {}
+        self._refresh_phone_until: dict[tuple[str, str], float] = {}
 
     @property
     def geocoder(self):
@@ -414,6 +417,75 @@ class ManualLocation:
         nickname = settings["nicknames"].get(target, "")
         configured = bool(target and nickname and self.hass.states.get(target) is not None)
         return {"configured": configured, "nickname": nickname if configured else ""}
+
+    async def async_refresh_location(self, connection, entity_id):
+        """Check the current view or request one assigned Companion phone update."""
+        self._require_loaded()
+        user = connection.user
+        if user is None or not user.is_admin:
+            raise LocationError("unauthorized")
+        if not isinstance(entity_id, str) or not entity_id.startswith("person.") or not valid_entity_id(entity_id):
+            raise LocationError("invalid_input")
+        if not user.permissions.check_entity(entity_id, POLICY_READ):
+            raise LocationError("unauthorized")
+        state = self.hass.states.get(entity_id)
+        if state is None or state.state == STATE_UNAVAILABLE:
+            raise LocationError("refresh_unavailable")
+        now = time.monotonic()
+        if self._refresh_person_until.get(entity_id, 0) > now:
+            raise LocationError("refresh_limited")
+        manual = self.data["persons"].get(entity_id)
+        if self.data["enabled"] and manual and manual["enabled"]:
+            self._refresh_person_until[entity_id] = now + 60
+            return {}
+        trackers = state.attributes.get("device_trackers")
+        if not isinstance(trackers, (list, tuple)) or not self.hass.services.has_service("notify", "send_message"):
+            raise LocationError("refresh_unavailable")
+        registry = er.async_get(self.hass)
+
+        def notify_for(tracker_id):
+            if not isinstance(tracker_id, str) or not tracker_id.startswith("device_tracker."):
+                return None
+            tracker = registry.async_get(tracker_id)
+            if (tracker is None or tracker.platform != "mobile_app" or tracker.disabled_by is not None
+                    or not tracker.device_id or not tracker.config_entry_id):
+                return None
+            config_entry = self.hass.config_entries.async_get_entry(tracker.config_entry_id)
+            tracker_state = self.hass.states.get(tracker_id)
+            if (config_entry is None or config_entry.domain != "mobile_app" or config_entry.disabled_by is not None
+                    or tracker_state is None or tracker_state.state == STATE_UNAVAILABLE):
+                return None
+            targets = [
+                entry.entity_id for entry in er.async_entries_for_config_entry(registry, tracker.config_entry_id)
+                if entry.domain == "notify" and entry.platform == "mobile_app"
+                and entry.device_id == tracker.device_id and entry.disabled_by is None
+                and (loaded := self.hass.states.get(entry.entity_id)) is not None and loaded.state != STATE_UNAVAILABLE
+            ]
+            if len(targets) > 1:
+                raise LocationError("refresh_unavailable")
+            return (targets[0], (tracker.config_entry_id, tracker.device_id)) if targets else None
+
+        current = state.attributes.get("source")
+        resolved = notify_for(current) if current in trackers else None
+        if resolved is None:
+            targets = {candidate for tracker in trackers if (candidate := notify_for(tracker)) is not None}
+            if len(targets) != 1:
+                raise LocationError("refresh_unavailable")
+            resolved = targets.pop()
+        target, phone_key = resolved
+        if self._refresh_phone_until.get(phone_key, 0) > now:
+            raise LocationError("refresh_limited")
+        # Reserve both limits before the first await, including failed sends.
+        self._refresh_person_until[entity_id] = now + 60
+        self._refresh_phone_until[phone_key] = now + 60
+        try:
+            await self.hass.services.async_call(
+                "notify", "send_message", {"message": "request_location_update"},
+                target={"entity_id": target}, blocking=True, context=Context(user_id=user.id),
+            )
+        except Exception:
+            raise LocationError("refresh_failed") from None
+        return {}
 
     def _snapshot(self):
         snapshot = deepcopy(self.data)
