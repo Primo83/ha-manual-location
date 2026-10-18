@@ -1,8 +1,8 @@
-import { activityPayload, activitySettings, adminPersonOptions, callWS, editHistory, errorText, localDateInput, readPoint, removeHistory } from "./data.js?v=0.1.32";
-import { L, makeMap, mapStyles, popup } from "./map-common.js?v=0.1.32";
-import { registerReloadBlocker, startUpdateCheck } from "./updates.js?v=0.1.32";
-import "./scenarios.js?v=0.1.32";
-import "./place-search.js?v=0.1.32";
+import { activityPayload, activitySettings, adminPersonOptions, callWS, editHistory, errorText, localDateInput, readPoint, removeHistory } from "./data.js?v=0.1.33";
+import { L, makeMap, mapStyles, popup } from "./map-common.js?v=0.1.33";
+import { registerReloadBlocker, startUpdateCheck } from "./updates.js?v=0.1.33";
+import "./scenarios.js?v=0.1.33";
+import "./place-search.js?v=0.1.33";
 
 const DRAFT_COLOR = "#7c3aed";
 const EDIT_COLOR = "#c65d00";
@@ -67,7 +67,7 @@ export class ManualLocationAdmin extends HTMLElement {
     window.removeEventListener?.("beforeunload", this._beforeUnload);
     this._stopUpdates?.(); this._stopUpdates = null;
     this._removeReloadBlocker?.(); this._removeReloadBlocker = null;
-    this._unbind(); this._clearSession(); this._destroyMap();
+    this._unbind(); this._clearSession("", true); this._destroyMap();
     clearTimeout(this._deviceToastTimer); this._deviceToast?.remove(); this._deviceToast = null;
   }
 
@@ -154,7 +154,7 @@ export class ManualLocationAdmin extends HTMLElement {
           ["current-lat", "current-lon", "history-lat", "history-lon", "history-time"].map((id) => this.shadowRoot.querySelector(`#${id}`)?.value)]) }),
       onBeforeSearch: () => this._cancelLocation(),
       onSelect: (point) => this._choosePlace(point),
-      onExpired: (message) => this._clearSession(`${message} Szkice zachowano w tej karcie.`, true),
+      onExpired: (message, code) => this._sessionError(message, code),
     };
   }
   _choosePlace(point) {
@@ -182,7 +182,8 @@ export class ManualLocationAdmin extends HTMLElement {
   _hasDrafts() { return !!(this._dirty || this._editing || this._editIndex >= 0 || Object.values(this._deletedHistory).some((points) => points.length)
     || Object.keys(this._removedCurrent).length || Object.keys(this._retained?.removedCurrent || {}).length
     || this._retained?.dirty || this._retained?.editing || this._retained?.editIndex >= 0
-    || Object.values(this._scenarioDrafts).some((draft) => draft.dirty || draft.editing)); }
+    || Object.values(this._scenarioDrafts).some((draft) => draft.dirty || draft.editing || draft.routeInput?.dirty)
+    || this._scenarios?.hasLocalChanges); }
   _syncScenarios() {
     const child = this.shadowRoot.querySelector("manual-location-scenarios");
     if (!child || !this._token || !this._snapshot) return;
@@ -193,7 +194,7 @@ export class ManualLocationAdmin extends HTMLElement {
       onSnapshot: (snapshot) => this._acceptScenarioSnapshot(snapshot),
       onStateChange: () => this._saveState(),
       onSelectPerson: (entityId) => this._selectPerson(entityId),
-      onExpired: (text) => this._clearSession(`${text} Szkice zachowano w tej karcie.`, true),
+      onExpired: (message, code) => this._sessionError(message, code),
     };
   }
   _acceptScenarioSnapshot(snapshot) {
@@ -219,9 +220,13 @@ export class ManualLocationAdmin extends HTMLElement {
       }
     } catch (error) {
       if (epoch !== this._epoch || token !== this._token) return;
-      if (["invalid_token", "pin_required", "unauthorized", "forbidden"].includes(error?.code)) this._clearSession(errorText(error), true);
+      if (["invalid_token", "pin_required", "unauthorized", "forbidden"].includes(error?.code)) this._sessionError(errorText(error), error.code);
       else this._message(errorText(error));
     }
+  }
+  _sessionError(message, code) {
+    const preserve = !["unauthorized", "forbidden"].includes(code);
+    this._clearSession(preserve ? `${message} Szkice zachowano w tej karcie.` : message, preserve);
   }
   _saveState() {
     this._refreshSources();
@@ -1179,10 +1184,17 @@ export class ManualLocationAdmin extends HTMLElement {
         for (const [id, value] of Object.entries(retained.fields)) this.shadowRoot.querySelector(`#${id}`).value = value;
         this.shadowRoot.querySelector("#history-current").checked = !!retained.historyCurrent;
         this._previewEdit();
-        this._message(snapshot.revision !== this._snapshot.revision ? "Szkice przywrócono. Dane HA zmieniły się podczas blokady; zapis może wymagać ponownego wczytania danych." : "Szkice przywrócono. Możesz kontynuować edycję.", true);
       }
+      if (retained && this._hasDrafts()) this._message(snapshot.revision !== this._snapshot.revision
+        ? "Szkice przywrócono. Dane HA zmieniły się podczas blokady; zapis może wymagać ponownego wczytania danych."
+        : "Szkice przywrócono. Możesz kontynuować edycję.", true);
       this._schedulePoll();
-    } catch (error) { if (epoch === this._epoch) this._message(errorText(error)); }
+    } catch (error) {
+      if (epoch === this._epoch) {
+        if (["unauthorized", "forbidden"].includes(error?.code)) this._sessionError(errorText(error), error.code);
+        else this._message(errorText(error));
+      }
+    }
     finally { if (epoch === this._epoch) { this._busy = false; this._saveState(); } }
   }
   async _admin(type, extra = {}) {
@@ -1196,7 +1208,7 @@ export class ManualLocationAdmin extends HTMLElement {
       return epoch === this._epoch ? { data } : null;
     } catch (error) {
       if (epoch === this._epoch) {
-        if (["invalid_token", "pin_required", "unauthorized", "forbidden"].includes(error?.code)) this._clearSession(`${errorText(error)} Szkice zachowano w tej karcie.`, true);
+        if (["invalid_token", "pin_required", "unauthorized", "forbidden"].includes(error?.code)) this._sessionError(errorText(error), error.code);
         else this._message(errorText(error));
       }
       return null;

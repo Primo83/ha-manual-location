@@ -1,4 +1,4 @@
-import { callWS, coordinates, errorText } from "./data.js?v=0.1.32";
+import { callWS, coordinates, errorText } from "./data.js?v=0.1.33";
 
 const TYPES = { amenity: "Obiekt / miejsce", building: "Adres / budynek", street: "Ulica", suburb: "Dzielnica",
   district: "Dzielnica", postcode: "Kod pocztowy", city: "Miejscowość", county: "Powiat", state: "Region", country: "Kraj" };
@@ -82,7 +82,7 @@ export class ManualLocationPlaceSearch extends HTMLElement {
       if (this._pending !== request) return;
       if (!this._matches(request)) { this.cancel(); return; }
       this._message(errorText(error));
-      if (["invalid_token", "pin_required", "unauthorized", "forbidden"].includes(error?.code)) this._context.onExpired?.(errorText(error));
+      if (["invalid_token", "pin_required", "unauthorized", "forbidden"].includes(error?.code)) this._context.onExpired?.(errorText(error), error.code);
     } finally { if (this._pending === request) this._pending = null; this._buttons(); }
   }
   _select(index, request) {

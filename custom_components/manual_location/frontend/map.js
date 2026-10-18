@@ -1,6 +1,6 @@
-import { callWS, errorText, geoModels, historyOpacity, historyPoints, historySegments, originalIds, personModels, validateView, zoneModels } from "./data.js?v=0.1.32";
-import { L, makeMap, mapStyles, personIcon, popup, setMapHass } from "./map-common.js?v=0.1.32";
-import { startUpdateCheck } from "./updates.js?v=0.1.32";
+import { callWS, errorText, geoModels, historyOpacity, historyPoints, historySegments, originalIds, personModels, validateView, zoneModels } from "./data.js?v=0.1.33";
+import { L, makeMap, mapStyles, personIcon, popup, setMapHass } from "./map-common.js?v=0.1.33";
+import { startUpdateCheck } from "./updates.js?v=0.1.33";
 
 const COLORS = ["#186d83", "#b05631", "#644f9a", "#42754b", "#a2376b"];
 
@@ -137,8 +137,10 @@ export class ManualLocationMap extends HTMLElement {
   }
 
   _cancelHold() {
-    clearTimeout(this._hold?.timer);
+    const hold = this._hold;
+    clearTimeout(hold?.timer);
     this._hold = null;
+    if (hold?.restoreDragging) hold.dragging.enable();
   }
 
   _clearMarkerHolds() {
@@ -161,6 +163,10 @@ export class ManualLocationMap extends HTMLElement {
       if (!event.isPrimary || event.button !== 0) { this._cancelHold(); return; }
       if (this._locationRequest || this._hold) return;
       const hold = { element, pointerId: event.pointerId, x: event.clientX, y: event.clientY };
+      hold.dragging = this._map.dragging;
+      hold.restoreDragging = hold.dragging.enabled();
+      // Leaflet starts a drag at 3px; keep the hold's 10px movement tolerance.
+      if (hold.restoreDragging) hold.dragging.disable();
       this._hold = hold;
       hold.timer = setTimeout(() => {
         if (this._hold !== hold) return;

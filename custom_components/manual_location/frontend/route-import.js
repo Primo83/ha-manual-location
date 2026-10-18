@@ -1,9 +1,9 @@
-import { callWS, coordinates, errorText } from "./data.js?v=0.1.32";
-import "./place-search.js?v=0.1.32";
+import { callWS, coordinates, errorText } from "./data.js?v=0.1.33";
+import "./place-search.js?v=0.1.33";
 
 const MODES = { walk: "Pieszo", drive: "Samochód", bicycle: "Rower", transit: "Komunikacja publiczna · szacunek" };
 const INTERVALS = [1, 5, 10, 15, 20, 30, 45, 60, 90, 120];
-const FIELDS = ["source", "url", "mode", "day", "start", "spacing", "interval", "min", "max", "duration"];
+const FIELDS = ["name", "source", "url", "mode", "day", "start", "spacing", "interval", "min", "max", "duration"];
 const validStop = (value) => typeof value === "string" && value.trim().length > 0 && value.length <= 300 && !/\p{C}/u.test(value);
 
 export class ManualLocationRouteImport extends HTMLElement {
@@ -16,12 +16,46 @@ export class ManualLocationRouteImport extends HTMLElement {
       || this._stops.some((point) => coordinates(point) || point.query);
   }
   set context(context) {
+    const changed = this._input !== context.input;
+    if (changed && this._rendered) { this._rememberInput(); this.cancel(false); }
     this._context = context;
+    this._input = context.input;
     if (this.isConnected && !this._rendered) this._render();
+    else if (changed && this._rendered) this._restoreInput();
     else this.sync();
   }
   connectedCallback() { if (this._context && !this._rendered) this._render(); }
-  disconnectedCallback() { this.cancel(true); }
+  disconnectedCallback() { this._rememberInput(); this.cancel(false); }
+  _rememberInput() {
+    if (!this._rendered || !this._input) return;
+    this._rememberQueries();
+    Object.assign(this._input, {
+      fields: Object.fromEntries(FIELDS.map((id) => [id, this.shadowRoot.querySelector(`#import-${id}`).value])),
+      stops: structuredClone(this._stops), open: this.shadowRoot.querySelector("details").open,
+      dirty: !!this._dirty, replan: !!this._replan, startFromNow: !!this._startFromNow,
+      lockedFields: this._lockedFields ? { ...this._lockedFields } : null, preparedInterval: this._preparedInterval,
+    });
+  }
+  _restoreInput() {
+    const saved = this._input?.fields ? structuredClone(this._input) : null;
+    this.resetRoute();
+    if (!saved) return;
+    for (const id of FIELDS) if (typeof saved.fields[id] === "string") this.shadowRoot.querySelector(`#import-${id}`).value = saved.fields[id];
+    this._stops = saved.stops || [];
+    this._dirty = !!saved.dirty; this._replan = !!saved.replan; this._startFromNow = !!saved.startFromNow;
+    this._lockedFields = saved.lockedFields; this._preparedInterval = saved.preparedInterval;
+    this._showPreparedInterval();
+    this.shadowRoot.querySelector("details").open = !!saved.open;
+    this._showStops(); this._resolvedContext = this._capture(); this._buttons();
+  }
+  _showPreparedInterval() {
+    this._intervalOption?.remove?.(); this._intervalOption = null;
+    if (this._preparedInterval != null && !INTERVALS.includes(this._preparedInterval)) {
+      const option = document.createElement("option"); option.value = String(this._preparedInterval); option.textContent = `${this._preparedInterval} min`;
+      this.shadowRoot.querySelector("#import-interval").append(option); this._intervalOption = option;
+      this.shadowRoot.querySelector("#import-interval").value = String(this._preparedInterval);
+    }
+  }
   prepareRoute(input) {
     if (!input || typeof input !== "object") return false;
     const { stops, routing: suppliedRouting, day, startTime, replan = false, startFromNow = false } = input;
@@ -38,11 +72,7 @@ export class ManualLocationRouteImport extends HTMLElement {
     set("source", "direct"); set("url", ""); set("mode", routing.mode); set("day", day); set("start", startTime); set("duration", "");
     const random = routing.interval_max_minutes != null;
     this._preparedInterval = random ? null : routing.interval_minutes;
-    this._intervalOption?.remove?.(); this._intervalOption = null;
-    if (!random && !INTERVALS.includes(routing.interval_minutes)) {
-      const option = document.createElement("option"); option.value = String(routing.interval_minutes); option.textContent = `${routing.interval_minutes} min`;
-      this.shadowRoot.querySelector("#import-interval").append(option); this._intervalOption = option;
-    }
+    this._showPreparedInterval();
     set("spacing", random ? "random" : "fixed"); set("interval", String(routing.interval_minutes));
     set("min", String(routing.interval_minutes)); set("max", String(routing.interval_max_minutes ?? routing.interval_minutes));
     this._stops = stops.map((point) => coordinates(point) ? { latitude: point.latitude, longitude: point.longitude,
@@ -51,6 +81,7 @@ export class ManualLocationRouteImport extends HTMLElement {
     this._lockedFields = replan ? { source: "direct", day, start: startTime } : null;
     this._dirty = true; this._showStops(); this._resolvedContext = this._capture(); this._buttons();
     this.shadowRoot.querySelector("details").open = true;
+    this._rememberInput();
     this._message(replan ? `Przebudowa dalszej części: początek i jego czas są zablokowane. Zmień cel lub dodaj przystanki, wyznacz podgląd i zatwierdź go przez Zapisz plan.${this._startFromNow ? " Godzina początku zostanie odświeżona przy wyznaczeniu podglądu." : ""}` : "Miejsca przygotowane. Sprawdź ustawienia i wyznacz trasę.");
     return true;
   }
@@ -58,10 +89,11 @@ export class ManualLocationRouteImport extends HTMLElement {
     this._replan = false; this._startFromNow = false; this._lockedFields = null; this._preparedInterval = null; this._dirty = false;
     this._intervalOption?.remove?.(); this._intervalOption = null;
     if (!this._rendered) { this.cancel(true); return; }
-    for (const [id, value] of [["source", "direct"], ["url", ""], ["mode", ""], ["day", this._context.getState().day],
+    for (const [id, value] of [["name", ""], ["source", "direct"], ["url", ""], ["mode", ""], ["day", this._context.getState().day],
       ["start", ""], ["spacing", "random"], ["interval", "15"], ["min", "9"], ["max", "15"], ["duration", ""]]) {
       this.shadowRoot.querySelector(`#import-${id}`).value = value;
     }
+    this.shadowRoot.querySelector("details").open = false;
     this.cancel(true);
   }
   _capture() {
@@ -125,6 +157,7 @@ export class ManualLocationRouteImport extends HTMLElement {
     const allowed = !!this._capture(), busy = !!this._pending;
     const direct = this.shadowRoot.querySelector("#import-source").value === "direct";
     const random = this.shadowRoot.querySelector("#import-spacing").value === "random";
+    this.shadowRoot.querySelector("#import-name-field").hidden = !!this._replan;
     for (const id of [...FIELDS, "resolve"]) this.shadowRoot.querySelector("#import-" + id).disabled = !allowed || busy;
     this.shadowRoot.querySelector("#import-link").hidden = direct;
     this.shadowRoot.querySelector("#import-fixed").hidden = random;
@@ -150,12 +183,14 @@ export class ManualLocationRouteImport extends HTMLElement {
     this._searches?.forEach((search) => search.sync?.());
     this._context.onMapStateChange?.({ stops: allowed ? this._stops.flatMap((point, index) => coordinates(point) ? [{ ...point, index }] : []) : [],
       stopCount: this._stops.length, generation: this._generation, picking: allowed ? this._mapPick?.index ?? null : null });
+    this._rememberInput();
   }
   _render() {
     this.shadowRoot.innerHTML = `<style>
       :host{display:block;border-bottom:1px solid var(--divider-color,#d9e2e0);font:inherit;color:var(--primary-text-color,#20343b)}*{box-sizing:border-box}details{padding:18px 22px}summary{font-weight:700;font-size:14px;cursor:pointer;min-height:24px}.body{margin-top:16px;max-width:900px}.link{display:flex;gap:9px;align-items:end}.link>div{flex:1;min-width:0}label{display:block;font-size:13px;font-weight:600;margin:0 0 7px}input,select,button{font:inherit;color:inherit;min-width:0;min-height:42px;border:1px solid var(--divider-color,#c8d6d4);border-radius:7px;background:var(--input-fill-color,var(--card-background-color,#fff))}input,select{width:100%;padding:9px 11px}button{padding:9px 13px;font-size:13px;font-weight:600;cursor:pointer}button.primary{background:#176e82;border-color:#176e82;color:#fff}button:disabled,input:disabled,select:disabled{opacity:.5;cursor:default}input:focus,select:focus,button:focus-visible{outline:2px solid #338b9c;outline-offset:2px}.grid{display:grid;grid-template-columns:repeat(3,minmax(0,1fr));gap:14px;margin:16px 0}.grid>div{min-width:0}p{font-size:12px;line-height:1.6;margin:9px 0;color:var(--secondary-text-color,#657a82)}a{color:var(--primary-color,#176e82)}ol{list-style:none;margin:12px 0;padding:0}li{border-top:1px solid var(--divider-color,#d9e2e0);padding:12px 0;font-size:13px;overflow-wrap:anywhere}li strong,li small{display:block}li small{font-size:12px;line-height:1.5;margin-top:5px;color:var(--secondary-text-color,#657a82)}manual-location-place-search{display:block;margin-top:10px;border:1px solid var(--divider-color,#d9e2e0);border-radius:7px}#import-status{border-left:3px solid #176e82;padding:8px 12px;overflow-wrap:anywhere}[hidden]{display:none!important}@media(max-width:600px){details{padding:16px 18px}.grid{grid-template-columns:1fr 1fr}.link{flex-wrap:wrap}.link>div{flex-basis:100%}.link>button{width:100%}}@media(max-width:360px){.grid{grid-template-columns:1fr}}
-      li>button{margin:8px 8px 0 0}button[aria-pressed=true]{background:#176e82;color:#fff;border-color:#176e82}
+      #import-name-field{margin-bottom:16px}li>button{margin:8px 8px 0 0}button[aria-pressed=true]{background:#176e82;color:#fff;border-color:#176e82}
       </style><details><summary>Wyznacz lub importuj trasę</summary><div class="body">
+      <div id="import-name-field"><label for="import-name">Nazwa wyznaczanej trasy</label><input id="import-name" maxlength="80" placeholder="np. Popołudniowa trasa"></div>
       <label for="import-source">Źródło trasy</label><select id="import-source"><option value="direct">Wyznacz we wtyczce</option><option value="google">Link Google Maps</option></select>
       <div class="link" id="import-link"><div><label for="import-url">Link do trasy Google Maps</label><input id="import-url" type="url" maxlength="8192" autocomplete="off" placeholder="https://maps.app.goo.gl/…"></div><button id="import-resolve" type="button">Odczytaj link</button></div>
       <p>Wybierz początek, cel i przystanki z wyników wyszukiwania lub wskaż je na mapie — możesz łączyć obie metody. Możesz też odczytać miejsca z linku Google Maps. Wyznaczenie tworzy tylko podgląd; zapis i Start zatwierdzasz osobno. Wyszukiwanie i wyznaczanie używają wspólnego limitu Geoapify.</p>
@@ -169,6 +204,7 @@ export class ManualLocationRouteImport extends HTMLElement {
       <p><a href="https://www.geoapify.com/" target="_blank" rel="noopener noreferrer">Powered by Geoapify</a> · <a href="https://www.openstreetmap.org/copyright" target="_blank" rel="noopener noreferrer">© OpenStreetMap</a> · wspólny limit zużycia z wyszukiwarką</p>
       </div></details>`;
     this._rendered = true;
+    this.shadowRoot.querySelector("details").addEventListener("toggle", () => this._rememberInput());
     this.shadowRoot.querySelector("#import-day").value = this._context.getState().day;
     for (const [id, value] of [["source", "direct"], ["spacing", "random"], ["min", "9"], ["max", "15"], ["interval", "15"]]) this.shadowRoot.querySelector("#import-" + id).value = value;
     for (const id of FIELDS) {
@@ -186,7 +222,7 @@ export class ManualLocationRouteImport extends HTMLElement {
       if (!this._replan || this._pending) return;
       this.resetRoute(); this._context.onCancelReplan?.();
     });
-    this.cancel(true);
+    this._restoreInput();
   }
   _showStops() {
     const list = this.shadowRoot.querySelector("#import-stops"); list.replaceChildren(); this._searches = []; this._changeButtons = []; this._pickButtons = []; this._stopButtons = [];
@@ -220,7 +256,7 @@ export class ManualLocationRouteImport extends HTMLElement {
             this._rememberQueries();
             this._stops[index] = { latitude: selected.latitude, longitude: selected.longitude, label: String(selected.label || "").slice(0, 300) };
             this._dirty = true; this.cancel(false); this._context.onShowStops?.(); return true;
-          }, onExpired: (message) => this._context.onExpired?.(message),
+          }, onExpired: (message, code) => this._context.onExpired?.(message, code),
         };
         const query = search.shadowRoot?.querySelector("#place-query");
         if (query) {
@@ -290,7 +326,7 @@ export class ManualLocationRouteImport extends HTMLElement {
   }
   _failure(error) {
     this._message(errorText(error));
-    if (["invalid_token", "pin_required", "unauthorized", "forbidden"].includes(error?.code)) this._context.onExpired?.(errorText(error));
+    if (["invalid_token", "pin_required", "unauthorized", "forbidden"].includes(error?.code)) this._context.onExpired?.(errorText(error), error.code);
   }
   async _build() {
     this.sync(); if (this._pending || !this._capture()) return;
@@ -313,6 +349,7 @@ export class ManualLocationRouteImport extends HTMLElement {
     const mode = value("mode"), random = value("spacing") === "random";
     const interval = Number(value(random ? "min" : "interval")), maximum = random ? Number(value("max")) : null;
     const duration = value("duration") === "" ? null : Number(value("duration"));
+    if (value("name").trim().length > 80) { this._message("Nazwa trasy może mieć najwyżej 80 znaków."); return; }
     if (!["direct", "google"].includes(value("source")) || !["random", "fixed"].includes(value("spacing"))
       || !Object.hasOwn(MODES, mode) || (random ? !Number.isInteger(interval) || interval < 1 || interval > 1440 || !Number.isInteger(maximum) || maximum < interval || maximum > 1440 : !INTERVALS.includes(interval) && interval !== this._preparedInterval)
       || !/^\d{4}-\d\d-\d\d$/.test(value("day")) || !/^(?:[01]\d|2[0-3]):[0-5]\d(?::[0-5]\d)?$/.test(value("start"))
@@ -320,7 +357,7 @@ export class ManualLocationRouteImport extends HTMLElement {
     if (this.picking) { this._message("Wskaż miejsce na mapie albo anuluj wskazywanie przed wyznaczeniem trasy."); return; }
     if (this._stops.length < 2 || this._stops.length > 12 || this._stops.some((point) => !coordinates(point))) { this._message("Wybierz dokładny początek i cel oraz wszystkie przystanki z wyników wyszukiwania, wskaż je na mapie lub odczytaj miejsca z linku. Maksymalnie 12 miejsc."); return; }
     const request = this._capture(), routing = { mode, interval_minutes: interval, ...(random ? { interval_max_minutes: maximum } : {}) };
-    const settings = { day: value("day"), startTime: value("start"), routing, startedAt }, replan = this._replan;
+    const settings = { name: value("name").trim(), day: value("day"), startTime: value("start"), routing, startedAt }, replan = this._replan;
     this._pending = request; this._buttons(); this._message("Wyznaczanie trasy i orientacyjnych godzin punktów…");
     try {
       const response = await callWS(this._context.getState().hass, { type: "manual_location/route_import", token: request.token,

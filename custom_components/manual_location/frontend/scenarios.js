@@ -1,7 +1,7 @@
-import { callWS, coordinates, errorText } from "./data.js?v=0.1.32";
-import { L, makeMap, mapStyles, setMapHass } from "./map-common.js?v=0.1.32";
-import "./place-search.js?v=0.1.32";
-import "./route-import.js?v=0.1.32";
+import { callWS, coordinates, errorText } from "./data.js?v=0.1.33";
+import { L, makeMap, mapStyles, setMapHass } from "./map-common.js?v=0.1.33";
+import "./place-search.js?v=0.1.33";
+import "./route-import.js?v=0.1.33";
 
 const STATUS = { draft: "Przygotowany", running: "Uruchomiony", stopped: "Zatrzymany", completed: "Ukończony" };
 const REASON = { global_disabled: "Wyłączono ręczne lokalizacje.", person_missing: "Tej osoby nie ma w HA.",
@@ -42,7 +42,7 @@ export function scenarioUTC(day, time, timeZone) {
 
 export class ManualLocationScenarios extends HTMLElement {
   constructor() { super(); this.attachShadow({ mode: "open" }); this._generation = 0; }
-  get hasLocalChanges() { return Object.values(this._context?.drafts || {}).some((draft) => draft.dirty || draft.editing)
+  get hasLocalChanges() { return Object.values(this._context?.drafts || {}).some((draft) => draft.dirty || draft.editing || draft.routeInput?.dirty)
     || !!this.shadowRoot.querySelector("#route-import")?.hasLocalChanges; }
   get busy() { return !!this._busy || !!this.shadowRoot.querySelector("#route-import")?.busy; }
   set context(context) {
@@ -61,18 +61,15 @@ export class ManualLocationScenarios extends HTMLElement {
       this._view.selectedByEntity[this._selected] = id;
     }
     const planChanged = this._planId !== id;
-    if (selectedChanged || planChanged) {
-      this._replan = null;
-      this.shadowRoot.querySelector("#route-import")?.resetRoute?.();
-    }
     this._planId = id;
     const server = plans[id];
     let draft = context.drafts[id];
-    if (!draft || (!draft.dirty && !draft.editing && draft.signature !== JSON.stringify(server || null))) {
+    if (!draft || (!draft.dirty && !draft.editing && !draft.routeInput?.dirty && draft.signature !== JSON.stringify(server || null))) {
       draft = context.drafts[id] = this._draftFor(server);
     }
     this._draft = draft;
     this._server = server;
+    if (selectedChanged || planChanged || !this._replan) this._replan = draft.routeReplan ? { ...draft.routeReplan, draft } : null;
     this._syncLocation();
     if (!this.isConnected) return;
     if (!this._map) this._render();
@@ -91,7 +88,7 @@ export class ManualLocationScenarios extends HTMLElement {
   _zone() { return this._state().hass.config?.time_zone || Intl.DateTimeFormat().resolvedOptions().timeZone; }
   _draftFor(server) {
     const plan = clone(server || { entity_id: this._selected, name: "", points: [], status: "draft", cursor: 0, reason: "" });
-    return { plan, signature: JSON.stringify(server || null), dirty: false, editing: false, deletedPoints: [],
+    return { plan, signature: JSON.stringify(server || null), dirty: false, editing: false, deletedPoints: [], routeInput: {}, routeReplan: null,
       day: plan.day || scenarioLocal(plan.points[0]?.timestamp || Date.now(), this._zone()).slice(0, 10),
       editor: { index: -1, latitude: "", longitude: "", time: "" },
       timing: { index: plan.cursor, startTime: "", minutes: "15", targetTime: "" } };
@@ -195,18 +192,19 @@ export class ManualLocationScenarios extends HTMLElement {
           this._view.selectedByEntity[this._selected], this._draft, this._state().snapshot?.scenarios?.[this._planId]]) }),
       onBeforeSearch: () => this._cancelLocation(),
       onSelect: (point) => this._choosePlace(point),
-      onExpired: (message) => this._context.onExpired(message),
+      onExpired: (message, code) => this._context.onExpired(message, code),
     };
   }
   _syncRouteImport() {
     const importer = this.shadowRoot.querySelector("#route-import"); if (!importer) return;
     importer.context = {
-      getState: () => { const state = this._state(); return { hass: state.hass, token: state.token,
+      input: this._draft.routeInput ||= {},
+      getState: () => { const state = this._state(), { routeInput, routeReplan, ...draft } = this._draft; return { hass: state.hass, token: state.token,
         allowed: !this._busy && !state.busy && !this._hasPlanConflict() && (!this._replan || this._replanCurrent()) && !!state.hass.states[this._selected], day: this._draft.day, timeZone: this._zone(),
-        stamp: JSON.stringify([this._generation, this._selected, this._planId, this._draft, state.snapshot?.scenarios?.[this._planId]]) }; },
+        stamp: JSON.stringify([this._generation, this._selected, this._planId, draft, state.snapshot?.scenarios?.[this._planId]]) }; },
       onImport: (dto, settings) => this._importRoute(dto, settings),
-      onCancelReplan: () => { this._replan = null; this._message("Przebudowa anulowana. Zapisany plan pozostaje bez zmian.", true); this._buttons(); },
-      onExpired: (message) => this._context.onExpired(message),
+      onCancelReplan: () => { this._replan = null; this._draft.routeReplan = null; this._message("Przebudowa anulowana. Zapisany plan pozostaje bez zmian.", true); this._buttons(); },
+      onExpired: (message, code) => this._context.onExpired(message, code),
       onMapStateChange: (mapState) => { this._routeMapState = mapState; this._drawRouteStops(); },
       onPickMap: () => {
         this._cancelLocation(); this._placeSearch?.cancel?.();
@@ -244,18 +242,20 @@ export class ManualLocationScenarios extends HTMLElement {
       ...stops.map((point) => ({ latitude: point.latitude, longitude: point.longitude, label: point.stop || "Cel" }))];
     if (places.length === 1) places.push({ query: "" });
     if (places.length > 12) { this._message("Dalsza trasa ma więcej niż 12 przystanków. Wybierz późniejszy punkt przebudowy."); return; }
-    this._replan = { planId: this._planId, entityId: this._selected, draft: this._draft, now, anchorIndex,
+    this._draft.routeReplan = { planId: this._planId, entityId: this._selected, now, anchorIndex,
       serverSignature: JSON.stringify(this._server || null), planSignature: JSON.stringify(plan) };
+    this._replan = { ...this._draft.routeReplan, draft: this._draft };
     if (!importer.prepareRoute?.({ stops: places, routing: plan.routing, day,
-      startTime: scenarioLocal(base, this._zone()).slice(11), replan: true, startFromNow: now })) { this._replan = null; return; }
+      startTime: scenarioLocal(base, this._zone()).slice(11), replan: true, startFromNow: now })) { this._replan = null; this._draft.routeReplan = null; return; }
     this._message(now ? "Przeliczasz od ostatniej wykonanej pozycji z czasem od teraz. Dodaj przystanki i wyznacz podgląd; Zapisz plan zatwierdzi zmiany."
       : "Odcinek do wskazanego punktu pozostaje bez zmian. Dostosuj dalsze przystanki i wyznacz podgląd; Zapisz plan zatwierdzi zmiany.", true);
     importer.scrollIntoView?.({ block: "start", behavior: "smooth" }); this._buttons();
   }
-  _importRoute(dto, { day, startTime, routing, startedAt }) {
+  _importRoute(dto, { name = "", day, startTime, routing, startedAt }) {
     const state = this._state();
     if (this._busy || state.busy || !state.token || !state.hass.user?.is_admin || state.hass.connected === false
       || !state.hass.states[this._selected]) throw new Error("Odblokuj panel i wybierz osobę przed wyznaczeniem trasy.");
+    if (typeof name !== "string" || name.trim().length > 80) throw new Error("Nazwa trasy może mieć najwyżej 80 znaków.");
     const replan = this._replan;
     if (replan && !this._replanCurrent()) throw new Error("Plan lub jego postęp zmienił się podczas wyznaczania. Przygotuj przeliczenie ponownie; dotychczasowa trasa pozostała bez zmian.");
     const start = replan ? (replan.now ? startedAt : Date.parse(this._draft.plan.points[replan.anchorIndex].timestamp)) : Date.parse(scenarioUTC(day, startTime, this._zone()));
@@ -277,7 +277,8 @@ export class ManualLocationScenarios extends HTMLElement {
       if (!pending.length || merged.length > 500) throw new Error("Przebudowa musi mieć dalszy punkt i zmieścić się w limicie 500 punktów całego planu. Zwiększ odstęp pomiarów.");
       if (merged.some((point, index) => index && Date.parse(point.timestamp) <= Date.parse(merged[index - 1].timestamp))) throw new Error("Nowe godziny muszą następować po zachowanym fragmencie planu.");
       if (this._server?.status === "running" && merged.slice(this._server.cursor).some((point) => Date.parse(point.timestamp) <= Date.now())) throw new Error("Podgląd ma już przeszłe punkty. Przelicz trasę ponownie, aby ustalić przyszłe godziny.");
-      this._cancelLocation(); this._replan = null;
+      this._cancelLocation(); this._replan = null; this._draft.routeReplan = null;
+      this.shadowRoot.querySelector("#route-import")?.resetRoute?.();
       this._draft.plan.points = merged;
       if (routing) this._draft.plan.routing = clone(routing);
       this._draft.dirty = true; this._resetEditor(); this._refresh(true); this._notify();
@@ -285,8 +286,11 @@ export class ManualLocationScenarios extends HTMLElement {
       return;
     }
     this._cancelLocation();
-    const id = this._newDraft(this._selected, true), draft = this._context.drafts[id];
-    draft.day = day; draft.plan.day = day; draft.plan.name = "Wyznaczona trasa"; draft.plan.points = points;
+    this.shadowRoot.querySelector("#route-import")?.resetRoute?.();
+    const reuse = !this._server && !this._draft.plan.points.length && !this._draft.editing && !this._draft.deletedPoints.length;
+    const id = reuse ? this._planId : this._newDraft(this._selected, true), draft = this._context.drafts[id];
+    draft.day = day; draft.plan.day = day; draft.plan.name = name.trim() || (reuse && draft.plan.name.trim()) || "Wyznaczona trasa"; draft.plan.points = points;
+    draft.dirty = true;
     if (routing) draft.plan.routing = clone(routing);
     this._view.personFilter = ""; this._view.statusFilter = ""; this._view.selectedByEntity[this._selected] = id;
     this.context = this._context; this._notify(); this._refresh(true);
@@ -516,7 +520,7 @@ export class ManualLocationScenarios extends HTMLElement {
     const focusedAction = active?.textContent;
     const entries = new Map(Object.entries(plans));
     for (const [id, draft] of Object.entries(this._context.drafts)) {
-      if (draft.dirty || draft.editing) entries.set(id, draft.plan);
+      if (draft.dirty || draft.editing || draft.routeInput?.dirty || draft.routeReplan) entries.set(id, draft.plan);
     }
     const personFilter = this.shadowRoot.querySelector("#scenario-filter-person");
     const statusFilter = this.shadowRoot.querySelector("#scenario-filter-status");
@@ -537,7 +541,7 @@ export class ManualLocationScenarios extends HTMLElement {
     const list = this.shadowRoot.querySelector("#scenario-library"); list.replaceChildren();
     for (const [id, plan] of entries) {
       const server = plans[id], draft = this._context.drafts[id];
-      const local = !!(draft?.dirty || draft?.editing), status = server?.status || "draft";
+      const local = !!(draft?.dirty || draft?.editing || draft?.routeInput?.dirty || draft?.routeReplan), status = server?.status || "draft";
       if (this._view.personFilter && this._view.personFilter !== plan.entity_id) continue;
       if (this._view.statusFilter && (this._view.statusFilter === "local" ? !local : status !== this._view.statusFilter)) continue;
       const row = document.createElement("div"); row.className = `plan-row${id === this._planId ? " selected" : ""}${local ? " local" : ""}`;
@@ -551,9 +555,10 @@ export class ManualLocationScenarios extends HTMLElement {
       info.append(name, detail, progress);
       const actions = document.createElement("div"); actions.className = "actions";
       const blocked = this._busy || state.busy || state.parentDirty || !state.token;
+      const localDeleteBlocked = blocked || this.busy || !this.isConnected || !state.hass.user?.is_admin || state.hass.connected === false;
       for (const [label, action, disabled] of [["Otwórz", "open", this._busy || state.busy],
         ["Start", "start", blocked || local || !server || status === "running" || server.cursor >= server.points.length || !state.snapshot.enabled || state.snapshot.persons[plan.entity_id]?.enabled === false || !state.hass.states[plan.entity_id]],
-        ["Stop", "stop", blocked || status !== "running"], ["Usuń", "delete", blocked || !server || status === "running"],
+        ["Stop", "stop", blocked || status !== "running"], ["Usuń", "delete", server ? blocked || status === "running" : localDeleteBlocked],
         ["Duplikuj", "duplicate", this._busy || state.busy || !state.token || !state.hass.user?.is_admin || state.hass.connected === false || !state.hass.states[plan.entity_id]]]) {
         const button = document.createElement("button"); button.textContent = label; button.disabled = !!disabled;
         button.setAttribute("aria-label", `${label} plan ${plan.name || "bez nazwy"} osoby ${personName(plan.entity_id)}`);
@@ -589,7 +594,7 @@ export class ManualLocationScenarios extends HTMLElement {
     this.shadowRoot.querySelector("#scenario-start").disabled = blocked || running || !this._server || this._draft.dirty || this._draft.editing || this._server.cursor >= this._server.points.length || !state.snapshot.enabled || state.snapshot.persons[this._selected]?.enabled === false || !state.hass.states[this._selected];
     this.shadowRoot.querySelector("#scenario-stop").disabled = blocked || !running;
     this.shadowRoot.querySelector("#scenario-delete").disabled = blocked || !this._server || running;
-    this.shadowRoot.querySelector("#scenario-discard").disabled = busy || (!this._draft.dirty && !this._draft.editing);
+    this.shadowRoot.querySelector("#scenario-discard").disabled = busy || (!this._draft.dirty && !this._draft.editing && !this._draft.routeInput?.dirty && !this._draft.routeReplan);
     const conflict = this._hasPlanConflict();
     const conflictMessage = "Trasa w HA zmieniła się podczas edycji, np. wykonano kolejny punkt. Twój szkic pozostał. Zabezpiecz potrzebne zmiany przez Duplikuj, a następnie kliknij Odrzuć szkic planu, aby wczytać aktualną trasę.";
     this.shadowRoot.querySelector("#scenario-save-state").textContent = conflict ? conflictMessage : state.parentDirty ? "Najpierw zapisz lub odrzuć zmiany pozycji i historii powyżej." : this._draft.editing ? "Dodaj / zastosuj albo anuluj edycję punktu." : this._draft.dirty ? (running ? "Niezapisane zmiany · Zapisz plan zachowa dalsze działanie trasy." : "Niezapisany plan · Zapisz plan nie uruchamia trasy.") : running ? "Trasa działa w HA · Możesz edytować oczekujące punkty i zapisać zmiany." : this._server ? "Plan zapisany · Start uruchamia wykonanie w HA." : "Plan będzie uruchamiany osobnym przyciskiem Start.";
@@ -745,8 +750,10 @@ export class ManualLocationScenarios extends HTMLElement {
     this._refresh(); this._notify();
   }
   _discard() {
-    if (this._busy || !window.confirm("Odrzucić niezapisany szkic tego planu? Wczytasz ostatni plan z HA; wykonana historia pozostanie.")) return;
+    if (this._busy || this._state().busy || !window.confirm("Odrzucić niezapisany szkic i formularz wyznaczania tego planu? Wczytasz ostatni plan z HA; wykonana historia pozostanie.")) return;
     this._cancelLocation();
+    this._replan = null;
+    this.shadowRoot.querySelector("#route-import")?.resetRoute?.();
     delete this._context.drafts[this._planId]; this.context = this._context; this._notify(); this._message("Niezapisane zmiany tego planu odrzucono.", true);
   }
   async _save() {
@@ -764,7 +771,27 @@ export class ManualLocationScenarios extends HTMLElement {
   async _action(action, id = this._planId) {
     const draft = this._context.drafts[id], server = this._state().snapshot.scenarios[id];
     if (action === "start" && (draft?.dirty || draft?.editing)) { this._message("Najpierw zapisz plan lub odrzuć szkic. Start uruchamia plan zapisany w HA."); return; }
-    if (!server) return;
+    if (!server) {
+      const state = this._state();
+      if (action !== "delete" || !draft || this.busy || state.busy || state.parentDirty || !this.isConnected
+        || !state.token || !state.hass.user?.is_admin || state.hass.connected === false) return;
+      const name = draft.plan.name.trim() || "Nowy szkic bez nazwy";
+      if (!window.confirm(`Usunąć lokalny szkic „${name}” i jego niezapisany formularz wyznaczania?`)) return;
+      const active = id === this._planId;
+      if (active) { this._cancelLocation(); this._replan = null; this.shadowRoot.querySelector("#route-import")?.resetRoute?.(); }
+      delete this._context.drafts[id];
+      if (this._view.selectedByEntity[draft.plan.entity_id] === id) delete this._view.selectedByEntity[draft.plan.entity_id];
+      if (active) {
+        const fallback = Object.keys(state.snapshot.scenarios || {}).find((key) => state.snapshot.scenarios[key].entity_id === this._selected)
+          || Object.keys(this._context.drafts).find((key) => { const item = this._context.drafts[key]; return item.plan.entity_id === this._selected
+            && (item.dirty || item.editing || item.routeInput?.dirty || item.routeReplan); });
+        if (fallback) this._view.selectedByEntity[this._selected] = fallback;
+        this.context = this._context;
+      }
+      else this._library();
+      this._notify(); this._message(`Lokalny szkic „${name}” usunięty.`, true);
+      return;
+    }
     if (action === "delete" && !window.confirm("Usunąć plan i jego oczekujące punkty? Wykonane punkty pozostaną w historii. Niezapisany szkic tego planu zostanie odrzucony.")) return;
     await this._mutate("scenario_action", { scenario_id: id, action }, action === "delete", id);
   }
@@ -791,14 +818,14 @@ export class ManualLocationScenarios extends HTMLElement {
       this._message(type === "scenario_save" ? (snapshot.scenarios[id]?.status === "running" ? "Zmiany zapisane. Trasa nadal działa w HA według nowych godzin." : "Plan zapisany. Kliknij Start, gdy chcesz uruchomić wykonanie w HA.") : extra.action === "start" ? "Plan uruchomiony w HA. Możesz zamknąć przeglądarkę." : extra.action === "stop" ? "Plan zatrzymany. Wykonana historia pozostaje." : "Plan usunięty. Wykonana historia pozostaje.", true);
     } catch (error) {
       if (generation !== this._generation) return;
-      if (["invalid_token", "pin_required", "unauthorized", "forbidden"].includes(error?.code)) this._context.onExpired(errorText(error));
+      if (["invalid_token", "pin_required", "unauthorized", "forbidden"].includes(error?.code)) this._context.onExpired(errorText(error), error.code);
       else {
         if (error?.code === "revision_conflict") {
           try {
             const snapshot = await callWS(state.hass, { type: "manual_location/admin_get", token: state.token });
             if (generation === this._generation && this._state().token === state.token) this._context.onSnapshot(snapshot);
           } catch (refreshError) {
-            if (["invalid_token", "pin_required", "unauthorized", "forbidden"].includes(refreshError?.code)) this._context.onExpired(errorText(refreshError));
+            if (["invalid_token", "pin_required", "unauthorized", "forbidden"].includes(refreshError?.code)) this._context.onExpired(errorText(refreshError), refreshError.code);
           }
         }
         this._message(error?.code === "revision_conflict" ? "Dane HA zmieniły się. Odświeżono stan; Twój szkic pozostał. Sprawdź wykonane punkty przed ponowieniem zapisu." : errorText(error));
