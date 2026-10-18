@@ -22,7 +22,7 @@ CACHE_KEY = f"{DOMAIN}_phone_activity"
 # Native Companion dispatcher protocol; importing mobile_app eagerly loads unrelated integrations.
 SIGNAL_SENSOR_UPDATE = "mobile_app_sensor_update"
 DEFAULT = {"enabled": True, "signals": ["unlock", "walking"], "match": "any", "manual_since": None}
-DEPENDENCIES = {"unlock": ("screen", "lock"), "walking": ("walking",), "screen": ("screen",)}
+DEPENDENCIES = {"unlock": ("screen", "lock"), "walking": ("walking",), "screen": ("screen",), "tilting": ("walking",)}
 SENSORS = {
     "screen": ("binary_sensor", "is_interactive"),
     "lock": ("binary_sensor", "keyguard_locked"),
@@ -45,7 +45,7 @@ def validate_activity(hass, value, previous=None, *, check_entities=True):
                     and (previous is None or settings != previous.get(entity_id)))
                 or not isinstance(settings, dict) or set(settings) != set(DEFAULT)
                 or type(settings["enabled"]) is not bool
-                or not isinstance(settings["signals"], list) or len(settings["signals"]) > 3
+                or not isinstance(settings["signals"], list) or len(settings["signals"]) > 4
                 or any(not isinstance(signal, str) or signal not in DEPENDENCIES for signal in settings["signals"])
                 or len(set(settings["signals"])) != len(settings["signals"])
                 or settings["match"] not in ("any", "all")):
@@ -323,6 +323,8 @@ class PhoneActivity:
             return values["screen"] == "on" and values["lock"] == "off"
         if signal == "screen":
             return values["screen"] == "on"
+        if signal == "tilting":
+            return values["walking"] == "tilting"
         return values["walking"] in WALKING
 
     def summary(self, user, entity_id):

@@ -106,7 +106,7 @@ export function activityPayload(config, now = Date.now()) {
   return Object.fromEntries(Object.entries(config).map(([id, value]) => {
     const settings = activitySettings(value);
     if (typeof settings.enabled !== "boolean" || !["any", "all"].includes(settings.match)
-      || settings.signals.some(signal => !["unlock", "walking", "screen"].includes(signal))
+      || settings.signals.some(signal => !["unlock", "walking", "screen", "tilting"].includes(signal))
       || new Set(settings.signals).size !== settings.signals.length) throw new Error("Aktywność: sprawdź wybrane sygnały i sposób ich łączenia.");
     if (settings.manual_since !== null && (typeof settings.manual_since !== "string"
       || !Number.isFinite(Date.parse(settings.manual_since)) || Date.parse(settings.manual_since) > now))
