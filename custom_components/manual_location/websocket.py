@@ -51,6 +51,7 @@ async def async_handle_command(hass, connection, msg):
         if operation == "admin_save":
             fields.discard("scenarios")
             fields.discard("quick_save")
+            fields.discard("activity")
         if operation in {"scenario_save", "scenario_action"} and "scenario_id" not in fields:
             raise LocationError("client_outdated")
         # Older clients omit the optional upper bound and keep fixed intervals.
@@ -100,6 +101,7 @@ async def async_handle_command(hass, connection, msg):
             result = await coordinator.async_save(
                 connection, msg["token"], msg["revision"], msg["enabled"], msg["persons"],
                 **({"quick_save": msg["quick_save"]} if "quick_save" in msg else {}),
+                **({"activity": msg["activity"]} if "activity" in msg else {}),
             )
         elif operation == "scenario_save":
             result = await coordinator.async_save_scenario(

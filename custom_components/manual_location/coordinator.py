@@ -286,7 +286,7 @@ class ManualLocation:
         self.entry = entry
         self.store = Store(hass, STORAGE_VERSION, DOMAIN, private=True, atomic_writes=True, serialize_in_event_loop=False)
         self.data = {"revision": 0, "enabled": True, "persons": {}, "scenarios": {},
-                     "quick_save": {"nicknames": {}, "entity_id": None}}
+                     "quick_save": {"nicknames": {}, "entity_id": None}, "activity": {}}
         self.sessions: dict[str, Session] = {}
         self.failures: dict[str, list[float]] = {}
         self.blocked_until: dict[str, float] = {}
@@ -301,8 +301,17 @@ class ManualLocation:
         self._storage_attempts = 0
         self._suspended = set()
         self._geocoder = None
+        self._phone_activity = None
         self._refresh_person_until: dict[str, float] = {}
         self._refresh_phone_until: dict[tuple[str, str], float] = {}
+
+    @property
+    def phone_activity(self):
+        if self._phone_activity is None:
+            from .phone_activity import PhoneActivity
+
+            self._phone_activity = PhoneActivity(self)
+        return self._phone_activity
 
     @property
     def geocoder(self):
@@ -314,6 +323,8 @@ class ManualLocation:
         return self._geocoder
 
     async def async_load(self):
+        from .phone_activity import validate_activity
+
         stored = await self.store.async_load()
         if stored is None:
             if self.entry.data.get("storage_initialized"):
@@ -323,7 +334,7 @@ class ManualLocation:
                 raise LocationError("storage_error")
         else:
             if (
-                not isinstance(stored, dict) or set(stored) not in (
+                not isinstance(stored, dict) or set(stored) - {"activity"} not in (
                     {"revision", "enabled", "persons"}, {"revision", "enabled", "persons", "scenarios"},
                     {"revision", "enabled", "persons", "quick_save"},
                     {"revision", "enabled", "persons", "scenarios", "quick_save"},
@@ -342,6 +353,7 @@ class ManualLocation:
                     self.hass, stored["persons"], stored["persons"], now, check_entities=False
                 )
                 stored["scenarios"] = validate_scenarios(self.hass, stored.get("scenarios", {}))
+                stored["activity"] = validate_activity(self.hass, stored.get("activity", {}), check_entities=False)
                 stored["quick_save"] = validate_quick_save(
                     self.hass, stored.get("quick_save", {"nicknames": {}, "entity_id": None}), check_entities=False,
                 )
@@ -359,6 +371,7 @@ class ManualLocation:
             self.hass.config_entries.async_update_entry(
                 self.entry, data={**self.entry.data, "storage_initialized": True}
             )
+        await self.phone_activity.async_load()
 
     def _require_loaded(self):
         if not self.loaded:
@@ -519,7 +532,9 @@ class ManualLocation:
         self._storage_attempts = 0
         self._suspended.clear()
 
-    async def async_save(self, connection, token, revision, enabled, persons, *, quick_save=_UNSET):
+    async def async_save(self, connection, token, revision, enabled, persons, *, quick_save=_UNSET, activity=_UNSET):
+        from .phone_activity import validate_activity
+
         async with self._save_lock:
             self.require_session(connection, token)
             if type(enabled) is not bool:
@@ -530,6 +545,7 @@ class ManualLocation:
                 "persons": validate_persons(self.hass, persons, self.data["persons"], datetime.now(UTC)),
                 "scenarios": deepcopy(self.data["scenarios"]),
                 "quick_save": deepcopy(self.data["quick_save"]) if quick_save is _UNSET else validate_quick_save(self.hass, quick_save),
+                "activity": deepcopy(self.data["activity"]) if activity is _UNSET else validate_activity(self.hass, activity, self.data["activity"]),
             }
             for scenario in snapshot["scenarios"].values():
                 entity_id = scenario["entity_id"]
@@ -540,6 +556,7 @@ class ManualLocation:
                         scenario.update(status="stopped", reason="manual_change")
             await self._commit(snapshot)
             self._reschedule()
+            self.phone_activity.rebind()
             return self._snapshot()
 
     async def async_save_scenario(self, connection, token, revision, scenario_id, entity_id, day, name, points, *, routing=_UNSET):
@@ -696,6 +713,7 @@ class ManualLocation:
     async def async_start(self):
         """Begin restored plans only after integration and HA startup are complete."""
         self._started = True
+        self.phone_activity.start()
         if self.hass.state == CoreState.running:
             await self._async_run_due(datetime.now(UTC))
         else:
@@ -768,6 +786,8 @@ class ManualLocation:
     async def async_shutdown(self):
         """Cancel timers/listeners and drain the one writer before unloading."""
         self.loaded = False
+        if self._phone_activity is not None:
+            await self.phone_activity.async_shutdown()
         for name in ("_timer_cancel", "_state_cancel", "_startup_cancel"):
             if cancel := getattr(self, name):
                 cancel()
@@ -818,4 +838,5 @@ class ManualLocation:
                 if preceding is not None:
                     history.insert(0, preceding)
                 overrides[entity_id] = {"current": person["current"], "history": history}
-        return deepcopy({"revision": self.data["revision"], "overrides": overrides})
+        activity = {entity_id: self.phone_activity.summary(connection.user, entity_id) for entity_id in entity_ids}
+        return deepcopy({"revision": self.data["revision"], "overrides": overrides, "activity": activity})

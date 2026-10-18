@@ -9,11 +9,13 @@ from homeassistant.components.http import HomeAssistantView
 from homeassistant.components.panel_custom import async_register_panel
 from homeassistant.exceptions import ConfigEntryNotReady
 from homeassistant.helpers import config_validation as cv
+from homeassistant.helpers.storage import Store
 from homeassistant.loader import async_get_integration
 
 from .const import DOMAIN, PANEL_PATH, STATIC_PATH
 from .coordinator import LocationError, ManualLocation
 from .geocoding import PlaceGeocoder
+from .phone_activity import CACHE_KEY
 from .websocket import async_register_commands
 
 CONFIG_SCHEMA = cv.config_entry_only_config_schema(DOMAIN)
@@ -81,3 +83,4 @@ async def async_remove_entry(hass, entry):
     """Delete this integration's manual data when its configuration is removed."""
     await ManualLocation(hass, entry).store.async_remove()
     await PlaceGeocoder(hass, entry).store.async_remove()
+    await Store(hass, 1, CACHE_KEY, private=True, atomic_writes=True).async_remove()

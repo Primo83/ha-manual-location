@@ -37,6 +37,14 @@ export function validateView(response, entityIds) {
     if (!entityIds.includes(id) || !coordinates(value?.current) || !Array.isArray(value.history)
       || value.history.some((p) => !coordinates(p) || !Number.isFinite(Date.parse(p.timestamp)))) throw new Error("invalid_view");
   }
+  if (response.activity !== undefined) {
+    if (!response.activity || typeof response.activity !== "object" || Array.isArray(response.activity)) throw new Error("invalid_view");
+    for (const [id, value] of Object.entries(response.activity)) {
+      if (!entityIds.includes(id) || !value || !["green", "red", "unknown", "hidden"].includes(value.status)
+        || (["green", "red"].includes(value.status)
+          ? typeof value.timestamp !== "string" || !Number.isFinite(Date.parse(value.timestamp)) : value.timestamp !== null)) throw new Error("invalid_view");
+    }
+  }
   return response;
 }
 
@@ -66,7 +74,8 @@ export function personModels(states, entityIds, view, originals, start, end) {
     const points = override ? override.history : (originals[id] || []);
     // Copy only identity fields. State/zone/gps_accuracy could disclose the original location.
     return [{ id, name: state.attributes.friendly_name || id, picture: state.attributes.entity_picture,
-      current, history: windowHistory(points, start, end) }];
+      current, history: windowHistory(points, start, end),
+      ...(view.activity?.[id] ? { activity: { status: view.activity[id].status, timestamp: view.activity[id].timestamp } } : {}) }];
   });
 }
 
@@ -86,6 +95,26 @@ export function adminPersonOptions(states, persons) {
   const ids = new Set([...Object.keys(states).filter((id) => id.startsWith("person.")), ...Object.keys(persons)]);
   return [...ids].map((id) => ({ id, missing: !states[id],
     name: states[id]?.attributes.friendly_name || `${id}${states[id] ? "" : " (brak w HA)"}` }));
+}
+
+export function activitySettings(value = {}) {
+  return { enabled: value.enabled ?? true, signals: [...(value.signals ?? ["unlock", "walking"])],
+    match: value.match ?? "any", manual_since: value.manual_since ?? null };
+}
+
+export function activityPayload(config, now = Date.now()) {
+  return Object.fromEntries(Object.entries(config).map(([id, value]) => {
+    const settings = activitySettings(value);
+    if (typeof settings.enabled !== "boolean" || !["any", "all"].includes(settings.match)
+      || settings.signals.some(signal => !["unlock", "walking", "screen"].includes(signal))
+      || new Set(settings.signals).size !== settings.signals.length) throw new Error("Aktywność: sprawdź wybrane sygnały i sposób ich łączenia.");
+    if (settings.manual_since !== null && (typeof settings.manual_since !== "string"
+      || !Number.isFinite(Date.parse(settings.manual_since)) || Date.parse(settings.manual_since) > now))
+      throw new Error("Aktywność: podaj poprawną datę i godzinę ostatniej aktywności, która nie leży w przyszłości.");
+    if (settings.enabled && settings.manual_since === null && !settings.signals.length)
+      throw new Error("Aktywność: wybierz przynajmniej jeden sygnał dla automatycznej zielonej kropki.");
+    return [id, settings];
+  }));
 }
 
 export function localDateInput(iso = new Date().toISOString()) {

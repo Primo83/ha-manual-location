@@ -1,6 +1,6 @@
-import { callWS, errorText, geoModels, historyOpacity, historyPoints, historySegments, originalIds, personModels, validateView, zoneModels } from "./data.js?v=0.1.27";
-import { L, makeMap, mapStyles, personIcon, popup, setMapHass } from "./map-common.js?v=0.1.27";
-import { startUpdateCheck } from "./updates.js?v=0.1.27";
+import { callWS, errorText, geoModels, historyOpacity, historyPoints, historySegments, originalIds, personModels, validateView, zoneModels } from "./data.js?v=0.1.28";
+import { L, makeMap, mapStyles, personIcon, popup, setMapHass } from "./map-common.js?v=0.1.28";
+import { startUpdateCheck } from "./updates.js?v=0.1.28";
 
 const COLORS = ["#186d83", "#b05631", "#644f9a", "#42754b", "#a2376b"];
 
@@ -314,7 +314,7 @@ export class ManualLocationMap extends HTMLElement {
       const color = COLORS[index % COLORS.length];
       const current = [person.current.latitude, person.current.longitude];
       const marker = L.marker(current, { icon: personIcon(person.name, person.picture, color), title: person.name, bubblingMouseEvents: false });
-      marker.bindPopup(popup(person.name, person.current)).addTo(this._layers);
+      marker.bindPopup(popup(person.name, person.current, person.activity)).addTo(this._layers);
       this._attachHold(marker, person);
       const request = this._locationRequest;
       if (request?.accepted && request.entityId === person.id && Date.parse(person.current.timestamp) > request.baseline) {
