@@ -24,9 +24,10 @@ def matching_gps(value, point):
 class NativeHooks:
     """Actual HA REST operations and fsync of its own persisted checkpoint."""
 
-    def __init__(self, base_url, token, tracker_id, person_id, config_dir, fault_control=None):
+    def __init__(self, base_url, token, tracker_id, person_id, config_dir, fault_control=None, *, control_token=None):
         self.base_url = base_url.rstrip("/")
         self.headers = {"Authorization": "Bearer " + token}
+        self.history_headers = {"X-Manual-Location-Key": control_token} if control_token else None
         self.tracker_id = tracker_id
         self.person_id = person_id
         self.restore_path = Path(config_dir) / ".storage" / "core.restore_state"
@@ -100,6 +101,32 @@ class NativeHooks:
                 return True
             await asyncio.sleep(0.05)
         return False
+
+    async def phone_snapshot(self, point):
+        snapshots = {}
+        for entity_id in (self.tracker_id, self.person_id):
+            async with self.client.get(self.base_url + "/api/states/" + entity_id) as response:
+                if response.status != 200:
+                    raise RuntimeError("phone snapshot unavailable")
+                state = await response.json()
+            attributes = state.get("attributes", {})
+            if (state.get("entity_id") != entity_id
+                    or not matching_gps([attributes.get("latitude"), attributes.get("longitude")], point)
+                    or attributes.get("gps_accuracy") != point["gps_accuracy"]):
+                return None
+            context = state.get("context")
+            snapshots[entity_id] = {"last_updated": state.get("last_updated"),
+                                    "context_id": context.get("id") if isinstance(context, dict) else None}
+        return snapshots
+
+    async def record_phone(self, payload):
+        if self.history_headers is None:
+            raise RuntimeError("phone history authentication unavailable")
+        async with self.client.post(self.base_url + "/api/manual_location/gateway_history",
+                                    headers=self.history_headers, json=payload) as response:
+            if response.status != 200:
+                raise RuntimeError("phone history capture rejected")
+            return await response.json()
 
     def checkpoint_disk(self, point):
         # Read the file HA created. Never construct or edit its contents here.

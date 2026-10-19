@@ -44,6 +44,7 @@ from __future__ import annotations
 
 import asyncio
 import contextlib
+from datetime import datetime
 import hashlib
 import hmac
 import json
@@ -52,6 +53,7 @@ import os
 import re
 import ssl
 import time
+import uuid
 from pathlib import Path
 from urllib.parse import urlsplit
 
@@ -139,7 +141,8 @@ class Gateway:
                  allow_fresh_setup=False, ready_native=None, recovery_retry_seconds=1,
                  source_session_check=None, source_control_check=None, passthrough_webhooks=(),
                  production_mode=False, max_ws_message_bytes=None, backend_ssl_server_hostname=None,
-                 denied_webhooks=(), allowed_push_url=None, registration_guard=None, backend_ssl_context=None):
+                 denied_webhooks=(), allowed_push_url=None, registration_guard=None, backend_ssl_context=None,
+                 phone_snapshot=None, record_phone=None, wall_clock=time.time):
         if type(production_mode) is not bool:
             raise ValueError("production mode")
         self.production_mode = production_mode
@@ -158,6 +161,12 @@ class Gateway:
             self.backend_request_options["ssl"] = backend_ssl_context
         if production_mode and registration_guard is None:
             raise ValueError("production registration guard required")
+        if (phone_snapshot is None) != (record_phone is None) or (production_mode and phone_snapshot is None):
+            raise ValueError("phone history callbacks required")
+        if phone_snapshot is not None and (not callable(phone_snapshot) or not callable(record_phone)):
+            raise ValueError("phone history callbacks required")
+        self.phone_snapshot, self.record_phone, self.wall_clock = phone_snapshot, record_phone, wall_clock
+        self.normal_grant = self.proven_phone = None
         self.registration_guard = registration_guard
         if allowed_push_url is not None:
             push = urlsplit(allowed_push_url)
@@ -337,6 +346,7 @@ class Gateway:
             self.mode, self.normal_after, self.source_session = "custom", None, None
             self.normal_operations.clear()
             self.last_phone_receipt = None
+            self.normal_grant = self.proven_phone = None
             # Revoke admission only. A queued replay of an older own point could
             # otherwise create extra zone transitions before the latest Store target.
         return valid
@@ -371,6 +381,81 @@ class Gateway:
         if recovery:
             result["recovery"] = True
         return result
+
+    def _begin_phone(self):
+        self._begin_native()
+        return {"grant": self.normal_grant, "source_session": self.source_session,
+                "lower": self.wall_clock(), "monotonic": self.clock()}
+
+    async def _finish_phone(self, point, admission):
+        metadata = None
+        if self.phone_snapshot is not None:
+            try:
+                snapshots = await self.phone_snapshot(dict(point))
+            except (Exception, asyncio.CancelledError) as error:
+                self._fail_native()
+                if isinstance(error, asyncio.CancelledError):
+                    raise
+                raise RuntimeError("phone snapshot unavailable") from None
+            upper, elapsed = self.wall_clock(), self.clock() - admission["monotonic"]
+            lower = admission["lower"]
+            bounds_valid = (all(type(value) in {int, float} and math.isfinite(value) for value in (lower, upper, elapsed))
+                            and upper >= lower and elapsed >= 0 and abs((upper - lower) - elapsed) <= 1)
+            valid = (bounds_valid and isinstance(snapshots, dict) and len(snapshots) == 2
+                     and self.person_id in snapshots and isinstance(admission["grant"], str)
+                     and isinstance(admission["source_session"], str))
+            proven = self.proven_phone
+            reusable = (proven is not None and proven["grant"] == admission["grant"]
+                        and proven["source_session"] == admission["source_session"] and proven["point"] == point)
+            if valid:
+                for entity_id, snapshot in snapshots.items():
+                    try:
+                        if (not isinstance(entity_id, str) or len(entity_id) > 256
+                                or not isinstance(snapshot, dict) or set(snapshot) != {"last_updated", "context_id"}
+                                or not isinstance(snapshot["last_updated"], str) or len(snapshot["last_updated"]) > 64
+                                or not isinstance(snapshot["context_id"], str)
+                                or not re.fullmatch(r"[A-Za-z0-9_-]{1,128}", snapshot["context_id"])):
+                            valid = False
+                            break
+                        timestamp = datetime.fromisoformat(snapshot["last_updated"].replace("Z", "+00:00"))
+                        if timestamp.tzinfo is None:
+                            valid = False
+                            break
+                        fresh = lower <= timestamp.timestamp() <= upper
+                        reused = reusable and proven["snapshots"].get(entity_id) == snapshot
+                        if not fresh and not reused:
+                            valid = False
+                            break
+                    except (ValueError, TypeError, OverflowError):
+                        valid = False
+                        break
+            if valid:
+                payload = {"operation_id": uuid.uuid4().hex, "grant": admission["grant"],
+                           "source_session": admission["source_session"], "point": dict(point),
+                           "snapshots": snapshots, "lower": lower, "upper": upper, "elapsed": elapsed}
+                try:
+                    result = await self.record_phone(payload)
+                    if (not isinstance(result, dict) or set(result) != {"history_id", "native_timestamp"}
+                            or not isinstance(result["history_id"], str)
+                            or not re.fullmatch(r"[A-Za-z0-9_-]{1,128}", result["history_id"])
+                            or result["native_timestamp"] != snapshots[self.person_id]["last_updated"]):
+                        raise RuntimeError("phone history acknowledgment invalid")
+                except (Exception, asyncio.CancelledError) as error:
+                    # Callback input/schema/database faults are native uncertainty, not phone input errors.
+                    self._fail_native()
+                    if isinstance(error, asyncio.CancelledError):
+                        raise
+                    raise RuntimeError("phone history capture failed") from None
+                metadata = {**result, "grant": admission["grant"]}
+                if self.normal_grant == admission["grant"] and self.source_session == admission["source_session"]:
+                    self.proven_phone = {"grant": admission["grant"], "source_session": admission["source_session"],
+                                         "point": dict(point), "snapshots": snapshots}
+        try:
+            self._commit_native()
+        except Exception:
+            self._fail_native()
+            raise
+        self.last_phone_receipt = {**self._receipt("phone"), **(metadata or {})}
 
     async def _read_json(self, request):
         if request.headers.get("Content-Encoding", "identity") != "identity":
@@ -435,6 +520,7 @@ class Gateway:
     def _fail_native(self):
         self.mode, self.normal_after, self.last_phone_receipt = "custom", None, None
         self.source_session = None
+        self.normal_grant = self.proven_phone = None
         # The marker was fsynced before forwarding; never clear it on an error.
 
     async def _publish_custom(self, point, operation, *, replay=False, recovery=False):
@@ -505,6 +591,7 @@ class Gateway:
     async def replay_last_custom(self):
         async with self.lock:
             self.mode, self.normal_after, self.last_phone_receipt = "custom", None, None
+            self.source_session = self.normal_grant = self.proven_phone = None
             if self.last_custom is None or self.upstream_uncertain:
                 return None
             try:
@@ -559,6 +646,7 @@ class Gateway:
                     self.mode, self.normal_after = "warmup", self.clock() + self.warmup_seconds
                     self.source_session = source_session
                     self.last_phone_receipt = None
+                    self.normal_grant, self.proven_phone = key, None
                     self.normal_operations[key] = self.normal_after
                 return web.json_response(self._status(), status=202)
             if self.source_control_check is not None:
@@ -569,6 +657,7 @@ class Gateway:
                     return web.json_response({"error": "source control session unavailable", **self._status()}, status=503)
             self.mode, self.normal_after, self.last_phone_receipt = "custom", None, None
             self.source_session = None
+            self.normal_grant = self.proven_phone = None
             self.normal_operations.clear()
             if "source_session" in body and self.source_control_check is None:
                 raise ValueError("custom schema")
@@ -736,13 +825,12 @@ class Gateway:
                     if kind == "blocked" or (kind == "location" and self._mode() != "normal"):
                         return web.json_response({} if self.production_mode else {"blocked": True, "mode": self._mode()})
                     if kind == "location":
-                        self._begin_native()
+                        admission = self._begin_phone()
                     status, data, headers = await self._http_forward(request, body)
                     if kind == "location":
                         if not 200 <= status < 300 or not await self.verify_native(dict(point)):
                             raise RuntimeError("phone readback failed")
-                        self._commit_native()
-                        self.last_phone_receipt = self._receipt("phone")
+                        await self._finish_phone(point, admission)
                     return web.Response(status=status, body=data, headers=headers)
             # Ordinary UI reads and our panel remain available; no generic REST write tunnel.
             if (not self.production_mode and request.method not in {"GET", "HEAD"}
@@ -887,15 +975,14 @@ class Gateway:
                 pending[identifier] = (future, registration_id)
                 try:
                     if category == "location":
-                        self._begin_native()
+                        admission = self._begin_phone()
                     await upstream.send_json({**command, "body": json.dumps(body)})
                     response = await asyncio.wait_for(future, self.upstream_timeout_seconds)
                     if category == "location":
                         status = response.get("result", {}).get("status", 0)
                         if not response.get("success") or not 200 <= status < 300 or not await self.verify_native(dict(point)):
                             raise RuntimeError("phone WS readback failed")
-                        self._commit_native()
-                        self.last_phone_receipt = self._receipt("phone")
+                        await self._finish_phone(point, admission)
                     await downstream.send_json(response)
                 finally:
                     pending.pop(identifier, None)

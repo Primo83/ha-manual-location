@@ -365,7 +365,8 @@ class Runtime:
         self.runtime_dir = Path(runtime_dir)
         self.guard = RegistrationGuard(options, config_dir)
         self.hooks = hooks or NativeHooks("http://supervisor/core", supervisor_token,
-                                         options.protected_tracker, options.protected_person, config_dir)
+                                         options.protected_tracker, options.protected_person, config_dir,
+                                         control_token=options.control_token)
         self.checkpoint_path = self.data_dir / "gateway-state.json"
         self.initializing_path = self.checkpoint_path.with_suffix(".json.initializing")
         tls_options = {"backend_ssl_context": backend_ssl_context(options, ssl_dir)} if options.mode == "production" else {}
@@ -374,6 +375,7 @@ class Runtime:
             person_id=options.protected_person, ready_native=self.hooks.ready,
             source_session_check=self.hooks.check_source_session,
             source_control_check=self.hooks.check_control_session,
+            phone_snapshot=self.hooks.phone_snapshot, record_phone=self.hooks.record_phone,
             passthrough_webhooks=options.passthrough_webhooks, denied_webhooks=options.denied_webhooks,
             production_mode=True, max_ws_message_bytes=8 * 1024 * 1024,
             backend_ssl_server_hostname=options.public_host,
