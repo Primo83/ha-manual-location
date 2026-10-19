@@ -6,6 +6,7 @@ import argparse
 import asyncio
 import contextlib
 from dataclasses import dataclass, field
+import hashlib
 import hmac
 import ipaddress
 import json
@@ -376,6 +377,8 @@ class Runtime:
             source_session_check=self.hooks.check_source_session,
             source_control_check=self.hooks.check_control_session,
             phone_snapshot=self.hooks.phone_snapshot, record_phone=self.hooks.record_phone,
+            core_boot=getattr(self.hooks, "core_boot", None), query_phone=getattr(self.hooks, "query_phone", None),
+            native_target=getattr(self.hooks, "native_target", None),
             passthrough_webhooks=options.passthrough_webhooks, denied_webhooks=options.denied_webhooks,
             production_mode=True, max_ws_message_bytes=8 * 1024 * 1024,
             backend_ssl_server_hostname=options.public_host,
@@ -516,7 +519,7 @@ class Runtime:
                 error = "STALE_BOOT"
             elif request_id in self.bootstrap_seen:
                 error = "DUPLICATE_REQUEST"
-            elif not isinstance(value["action"], str) or value["action"] not in {"initialize", "attach"}:
+            elif not isinstance(value["action"], str) or value["action"] not in {"initialize", "attach", "legacy_barrier"}:
                 error = "ACTION_DENIED"
             elif len(self.bootstrap_seen) >= 128:
                 error = "REQUEST_LIMIT"
@@ -526,10 +529,16 @@ class Runtime:
                 if value["action"] == "initialize":
                     async with self.gateway.lock:
                         await self.initialize(value["payload"])
+                elif value["action"] == "legacy_barrier":
+                    payload = value["payload"]
+                    if not isinstance(payload, dict) or set(payload) != {"checkpoint_sha256", "core_boot", "target"}:
+                        raise ConfigurationError("INVALID_LEGACY_BARRIER")
+                    async with self.gateway.lock:
+                        await self.gateway.legacy_barrier(payload["checkpoint_sha256"], payload["core_boot"], payload["target"])
                 else:
                     await self.attach(value["payload"])
                 success, error = True, None
-        except (ConfigurationError, ValueError, OSError, ClientError, asyncio.TimeoutError):
+        except (ConfigurationError, ValueError, TypeError, KeyError, OSError, RuntimeError, ClientError, asyncio.TimeoutError):
             pass
         self.write_bootstrap_json("result.json", {"id": request_id, "success": success, "error_code": error})
         return True
@@ -593,7 +602,9 @@ class Runtime:
         await health_runner.setup()
         await web.TCPSite(health_runner, LIVE_HOST, LIVE_PORT).start()
         self.bootstrap_dir.mkdir(mode=0o700, parents=True, exist_ok=True)
-        self.write_bootstrap_json("status.json", {"boot_nonce": self.boot_nonce, "ready": True})
+        self.write_bootstrap_json("status.json", {"boot_nonce": self.boot_nonce, "ready": True,
+            "checkpoint_sha256": hashlib.sha256(self.checkpoint_path.read_bytes()).hexdigest()
+                if self.checkpoint_path.exists() else None})
         self.bootstrap_task = asyncio.create_task(self.watch_bootstrap())
         self.cert_task = asyncio.create_task(self.watch_certificates())
 

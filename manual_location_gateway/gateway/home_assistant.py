@@ -3,6 +3,7 @@
 import argparse
 import asyncio
 import json
+import math
 import os
 from pathlib import Path
 import signal
@@ -27,7 +28,7 @@ class NativeHooks:
     def __init__(self, base_url, token, tracker_id, person_id, config_dir, fault_control=None, *, control_token=None):
         self.base_url = base_url.rstrip("/")
         self.headers = {"Authorization": "Bearer " + token}
-        self.history_headers = {"X-Manual-Location-Key": control_token} if control_token else None
+        self.history_key = control_token
         self.tracker_id = tracker_id
         self.person_id = person_id
         self.restore_path = Path(config_dir) / ".storage" / "core.restore_state"
@@ -79,6 +80,16 @@ class NativeHooks:
         except (aiohttp.ClientError, asyncio.TimeoutError, ValueError):
             return False
 
+    async def core_boot(self):
+        async with self.client.get(self.base_url + "/api/manual_location/gateway_session?control=1") as response:
+            if response.status != 200:
+                raise RuntimeError("native epoch unavailable")
+            value = await response.json()
+        nonce = value.get("core_boot") if isinstance(value, dict) else None
+        if not isinstance(nonce, str) or not 16 <= len(nonce) <= 128:
+            raise RuntimeError("native epoch unavailable")
+        return nonce
+
     async def verify(self, point):
         for _ in range(60):
             matched = True
@@ -120,13 +131,48 @@ class NativeHooks:
         return snapshots
 
     async def record_phone(self, payload):
-        if self.history_headers is None:
+        if self.history_key is None:
             raise RuntimeError("phone history authentication unavailable")
         async with self.client.post(self.base_url + "/api/manual_location/gateway_history",
-                                    headers=self.history_headers, json=payload) as response:
+                                    json={**payload, "gateway_key": self.history_key}) as response:
             if response.status != 200:
                 raise RuntimeError("phone history capture rejected")
             return await response.json()
+
+    async def query_phone(self, binding):
+        if self.history_key is None:
+            raise RuntimeError("phone history authentication unavailable")
+        async with self.client.post(self.base_url + "/api/manual_location/gateway_history/query",
+                                    json={**binding, "gateway_key": self.history_key}) as response:
+            if response.status != 200:
+                raise RuntimeError("phone history query rejected")
+            return await response.json()
+
+    async def native_target(self):
+        """Used only by the explicitly attested stopped-Core repair actor."""
+        states = {}
+        for entity_id in (self.tracker_id, self.person_id):
+            async with self.client.get(self.base_url + "/api/states/" + entity_id) as response:
+                if response.status != 200:
+                    raise RuntimeError("native target unavailable")
+                state = await response.json()
+            if state.get("entity_id") != entity_id or state.get("state") in {"unknown", "unavailable"}:
+                raise RuntimeError("native target unavailable")
+            states[entity_id] = state
+        person = states[self.person_id]
+        attrs = person.get("attributes", {})
+        point = {"person_id": self.person_id, **{key: attrs.get(key) for key in ("latitude", "longitude", "gps_accuracy")}}
+        if (any(type(point[key]) not in {int, float} or not math.isfinite(point[key])
+                for key in ("latitude", "longitude", "gps_accuracy")) or abs(point["latitude"]) > 90
+                or abs(point["longitude"]) > 180 or point["gps_accuracy"] < 0):
+            raise RuntimeError("native target unavailable")
+        if not await self.verify(point):
+            raise RuntimeError("native target mismatch")
+        snapshots = await self.phone_snapshot(point)
+        if snapshots is None:
+            raise RuntimeError("native target mismatch")
+        return {"point": point, "snapshots": snapshots,
+                "native_timestamp": person.get("last_updated"), "operation_id": None}
 
     def checkpoint_disk(self, point):
         # Read the file HA created. Never construct or edit its contents here.

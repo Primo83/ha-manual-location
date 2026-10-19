@@ -152,7 +152,8 @@ class Gateway:
                  source_session_check=None, source_control_check=None, passthrough_webhooks=(),
                  production_mode=False, max_ws_message_bytes=None, backend_ssl_server_hostname=None,
                  denied_webhooks=(), allowed_push_url=None, registration_guard=None, backend_ssl_context=None,
-                 phone_snapshot=None, record_phone=None, wall_clock=time.time):
+                 phone_snapshot=None, record_phone=None, wall_clock=time.time,
+                 core_boot=None, query_phone=None, native_target=None):
         if type(production_mode) is not bool:
             raise ValueError("production mode")
         self.production_mode = production_mode
@@ -176,6 +177,11 @@ class Gateway:
         if phone_snapshot is not None and (not callable(phone_snapshot) or not callable(record_phone)):
             raise ValueError("phone history callbacks required")
         self.phone_snapshot, self.record_phone, self.wall_clock = phone_snapshot, record_phone, wall_clock
+        self.core_boot, self.query_phone, self.native_target = core_boot, query_phone, native_target
+        self.handoff_enabled = core_boot is not None and query_phone is not None
+        self.native_boot = None
+        self.phone_pending = self.phone_baseline = self.latest_verified_phone = None
+        self.handoff = self.handoff_receipt = None
         self.normal_grant = self.proven_phone = None
         self.registration_guard = registration_guard
         if allowed_push_url is not None:
@@ -230,6 +236,7 @@ class Gateway:
         self.scheduled_return = self.return_receipt = None
         self._return_deadline = self._return_clock = None
         self._return_dirty = False
+        self._handoff_dirty = False
         self._load_checkpoint()
         self.app = web.Application(client_max_size=self.max_ws_message_bytes if production_mode else max_body_bytes)
         self.app.router.add_route("*", "/{path:.*}", self._handle)
@@ -239,9 +246,34 @@ class Gateway:
     def _load_checkpoint(self):
         try:
             state = _json(self.checkpoint_path.read_bytes())
-            if not isinstance(state, dict) or state.get("person_id") != self.person_id or state.get("version") not in {1, 2, 3}:
+            if not isinstance(state, dict) or state.get("person_id") != self.person_id or state.get("version") not in {1, 2, 3, 4}:
                 raise ValueError("checkpoint identity")
-            if state["version"] == 3:
+            if state["version"] == 4:
+                if not self.handoff_enabled:
+                    raise ValueError("handoff capability required")
+                self.phone_pending = state.get("phone_pending")
+                self.phone_baseline = state.get("phone_baseline")
+                self.native_boot = state.get("native_boot")
+                for binding in (self.phone_pending, self.phone_baseline):
+                    if binding is not None:
+                        self._validate_binding(binding, pending=binding is self.phone_pending)
+                self.handoff = state.get("handoff")
+                self.handoff_receipt = state.get("handoff_receipt")
+                if self.handoff is not None:
+                    self._validate_handoff(self.handoff)
+                if self.handoff_receipt is not None:
+                    receipt = self.handoff_receipt
+                    if (not isinstance(receipt, dict) or set(receipt) != {"key", "digest", "to_id"}
+                            or not self._return_id(receipt["key"]) or self.handoff is None
+                            or receipt["to_id"] != self.handoff["id"]
+                            or not isinstance(receipt["digest"], str)
+                            or not re.fullmatch(r"[0-9a-f]{64}", receipt["digest"])):
+                        raise ValueError("handoff receipt")
+                if self.native_boot is not None and not self._return_id(self.native_boot):
+                    raise ValueError("native epoch")
+            if state["version"] == 3 and state.get("scheduled_return") is None:
+                raise ValueError("missing scheduled return")
+            if state.get("scheduled_return") is not None:
                 plan = state["scheduled_return"]
                 if (not isinstance(plan, dict) or set(plan) != {"id", "at", "state"}
                         or not self._return_id(plan["id"]) or plan["state"] not in {"idle", "armed", "due", "applied"}
@@ -262,7 +294,7 @@ class Gateway:
                 raise ValueError("checkpoint uncertainty")
             self.upstream_uncertain = state.get("upstream_uncertain", False)
             self.uncertainty_origin = "unknown" if self.upstream_uncertain else None
-            if state["version"] in {2, 3} and self.upstream_uncertain:
+            if state["version"] in {2, 3, 4} and self.upstream_uncertain:
                 origin = state.get("uncertainty_origin")
                 if origin not in {"custom", "phone", "unknown"}:
                     raise ValueError("uncertainty origin")
@@ -286,6 +318,9 @@ class Gateway:
                 self.last_custom_receipt = state.get("custom_receipt")
                 self.sequence = int(state.get("sequence", 0))
                 self.replay_required = True
+            if self._handoff_pending() and (self.last_custom != self.handoff["point"]
+                    or self.last_operation != self._operation("handoff_" + self.handoff["id"], self.last_custom)):
+                raise ValueError("handoff target identity")
         except FileNotFoundError:
             self.upstream_uncertain = not self.allow_fresh_setup
             self.uncertainty_origin = "unknown" if self.upstream_uncertain else None
@@ -294,10 +329,14 @@ class Gateway:
             self.upstream_uncertain = True
             self.uncertainty_origin, self.pending_custom = "unknown", None
             self.last_custom = self.last_operation = self.last_custom_receipt = None
+            self.phone_pending = self.phone_baseline = self.handoff = self.handoff_receipt = None
 
     def _save(self, *, last_custom, operation, receipt, pending=_UNCHANGED, upstream_uncertain=None):
         uncertain = self.upstream_uncertain if upstream_uncertain is None else upstream_uncertain
-        state = {"version": 3 if self.scheduled_return is not None else 2, "person_id": self.person_id, "mode": "custom",
+        modern = self.handoff_enabled and any(value is not None for value in (
+            self.phone_pending, self.phone_baseline, self.handoff, self.native_boot))
+        state = {"version": 4 if modern else 3 if self.scheduled_return is not None else 2,
+                 "person_id": self.person_id, "mode": "custom",
                  "last_custom": last_custom, "operation": operation,
                  "custom_receipt": receipt,
                  "pending_custom": self.pending_custom if pending is _UNCHANGED else pending,
@@ -306,6 +345,9 @@ class Gateway:
                  "uncertainty_origin": self.uncertainty_origin if uncertain else None}
         if self.scheduled_return is not None:
             state.update(scheduled_return=self.scheduled_return, return_receipt=self.return_receipt)
+        if modern:
+            state.update(phone_pending=self.phone_pending, phone_baseline=self.phone_baseline,
+                         native_boot=self.native_boot, handoff=self.handoff, handoff_receipt=self.handoff_receipt)
         data = json.dumps(state, allow_nan=False, separators=(",", ":")).encode()
         self.checkpoint_path.parent.mkdir(parents=True, exist_ok=True)
         temporary = self.checkpoint_path.with_name(self.checkpoint_path.name + ".tmp")
@@ -324,6 +366,7 @@ class Gateway:
             with contextlib.suppress(FileNotFoundError):
                 temporary.unlink()
         self._return_dirty = False
+        self._handoff_dirty = False
 
     @staticmethod
     def _return_id(value):
@@ -378,9 +421,25 @@ class Gateway:
 
     async def _recover_tick(self):
         self._expire_return()
-        if self._return_dirty:
+        if self._return_dirty or self._handoff_dirty:
             async with self.lock:
                 self._save_return()  # Preserve any phone/own marker already owned by the writer.
+        if self.handoff_enabled and self._handoff_pending() and self.upstream_uncertain and self._recoverable():
+            await self.recover_pending_custom()
+            return
+        returning = self.scheduled_return is not None and self.scheduled_return["state"] in {"due", "applied"}
+        if self.handoff_enabled and (self._handoff_pending() or (
+                (self.phone_pending or (self.phone_baseline and (self.replay_required or returning)))
+                and self.mode == "custom")):
+            async with self.lock:
+                try:
+                    if self._handoff_pending():
+                        await self._finish_handoff()
+                    else:
+                        await self._freeze_handoff()
+                except Exception:
+                    self._fail_native()
+            return
         if self._recoverable():
             await self.recover_pending_custom()
         elif self.replay_required and not self.upstream_uncertain:
@@ -467,14 +526,17 @@ class Gateway:
                 "remaining_seconds": max(0, self.normal_after - self.clock()) if self._mode() == "warmup" else 0,
                 "last_custom_receipt": self.last_custom_receipt,
                 "last_phone_receipt": self.last_phone_receipt,
-                "replay_required": self.replay_required,
+                "replay_required": self.replay_required or self._handoff_dirty,
                 "upstream_uncertain": self.upstream_uncertain,
                 "uncertainty_origin": self.uncertainty_origin,
                 "recovery_phase": self.pending_custom["phase"] if self.pending_custom else None,
                 "recovery_retryable": self._recoverable(),
                 "custom_point_digest": _custom_point_digest(self.last_custom, self.person_id) if verified_own else None,
                 "scheduled_return_supported": True,
-                "scheduled_return": dict(self.scheduled_return) if self.scheduled_return is not None else None}
+                "scheduled_return": dict(self.scheduled_return) if self.scheduled_return is not None else None,
+                "handoff_supported": self.handoff_enabled,
+                "handoff": {key: self.handoff[key] for key in ("id", "state")} if self.handoff else None,
+                "phone_phase": self.phone_pending.get("phase") if self.phone_pending else None}
 
     def _receipt(self, origin, *, replay=False, recovery=False):
         self.sequence += 1
@@ -484,12 +546,17 @@ class Gateway:
             result["recovery"] = True
         return result
 
-    def _begin_phone(self):
-        if self._expire_return():
+    def _begin_phone(self, expected=None):
+        if (self._mode() != "normal" or self._expire_return()
+                or (expected is not None and expected != (self.normal_grant, self.source_session))):
             return None
-        self._begin_native()
         admission = {"grant": self.normal_grant, "source_session": self.source_session,
                      "lower": self.wall_clock(), "monotonic": self.clock()}
+        if self.handoff_enabled:
+            admission.update(operation_id=uuid.uuid4().hex, core_boot=self.native_boot)
+            self.phone_pending = {key: admission[key] for key in ("operation_id", "grant", "source_session", "core_boot")}
+            self.phone_pending.update(phase="phone_inflight", request_digest=None)
+        self._begin_native()
         if self._expire_return():
             # This marker is ours and no forward has started. Its clear must be durable.
             self._commit_native()
@@ -497,6 +564,8 @@ class Gateway:
         return admission
 
     async def _finish_phone(self, point, admission):
+        if self.handoff_enabled:
+            return await self._finish_admitted_phone(point, admission)
         metadata = None
         if self.phone_snapshot is not None:
             try:
@@ -567,6 +636,180 @@ class Gateway:
         self.last_phone_receipt = {**self._receipt("phone"), **(metadata or {})}
         self._expire_return()
 
+    async def _prepare_phone(self):
+        expected = (self.normal_grant, self.source_session)
+        if self.handoff_enabled:
+            self.native_boot = await self.core_boot()
+        return expected
+
+    def _phone_forward_closed(self):
+        if self.handoff_enabled:
+            self.phone_pending = {**self.phone_pending, "phase": "phone_forward_closed"}
+            self._save_return()
+
+    @staticmethod
+    def _request_digest(payload):
+        return hashlib.sha256(json.dumps(payload, sort_keys=True, separators=(",", ":"), allow_nan=False).encode()).hexdigest()
+
+    @classmethod
+    def _validate_binding(cls, value, *, pending=False):
+        required = {"operation_id", "grant", "source_session", "core_boot", "request_digest"}
+        if (not isinstance(value, dict) or set(value) != required | ({"phase"} if pending else set())
+                or any(not cls._return_id(value[key]) for key in required - {"request_digest"})
+                or (value["request_digest"] is not None and not re.fullmatch(r"[0-9a-f]{64}", value["request_digest"]))
+                or (not pending and value["request_digest"] is None)
+                or (pending and value["phase"] not in {"phone_inflight", "phone_forward_closed"})):
+            raise ValueError("phone binding")
+
+    def _validate_handoff(self, value):
+        if (not isinstance(value, dict) or not self._return_id(value.get("id"))
+                or value.get("state") not in {"idle", "prepared", "applied"}):
+            raise ValueError("handoff checkpoint")
+        if value["state"] != "idle":
+            point = value["point"]
+            if _point({k: v for k, v in point.items() if k != "person_id"}, self.person_id) != point:
+                raise ValueError("handoff point")
+            if point["gps_accuracy"] != 0:
+                raise ValueError("handoff accuracy")
+            self._native_time(value["native_timestamp"])
+
+    @staticmethod
+    def _native_time(value):
+        if not isinstance(value, str) or len(value) > 64:
+            raise ValueError("native timestamp")
+        instant = datetime.fromisoformat(value.replace("Z", "+00:00"))
+        if instant.tzinfo is None:
+            raise ValueError("native timestamp")
+        return instant.timestamp()
+
+    def _handoff_pending(self):
+        return self.handoff is not None and self.handoff["state"] in {"prepared", "applied"}
+
+    async def _finish_admitted_phone(self, point, admission):
+        try:
+            if await self.core_boot() != admission["core_boot"]:
+                raise RuntimeError("native epoch changed")
+            snapshots = await self.phone_snapshot(dict(point))
+            if not isinstance(snapshots, dict) or len(snapshots) != 2 or self.person_id not in snapshots:
+                raise RuntimeError("phone snapshot unavailable")
+            upper, elapsed = self.wall_clock(), self.clock() - admission["monotonic"]
+            lower = admission["lower"]
+            if (not all(type(v) in {int, float} and math.isfinite(v) for v in (lower, upper, elapsed))
+                    or upper < lower or not 0 <= elapsed <= 60 or abs(upper - lower - elapsed) > 1):
+                raise RuntimeError("phone clock changed")
+            for entity, snapshot in snapshots.items():
+                if (not isinstance(entity, str) or not isinstance(snapshot, dict)
+                        or set(snapshot) != {"last_updated", "context_id"}
+                        or not self._return_id(snapshot["context_id"])
+                        or self._native_time(snapshot["last_updated"]) > upper + 1):
+                    raise RuntimeError("phone snapshot unavailable")
+            candidate = {"point": dict(point), "snapshots": snapshots,
+                         "native_timestamp": snapshots[self.person_id]["last_updated"],
+                         "operation_id": admission["operation_id"]}
+            self.latest_verified_phone = candidate
+            payload = {key: admission[key] for key in ("operation_id", "grant", "source_session", "core_boot")}
+            payload.update(point=dict(point), snapshots=snapshots, lower=lower, upper=upper, elapsed=elapsed)
+            binding = {**self.phone_pending, "request_digest": self._request_digest(payload)}
+            self.phone_pending = binding
+            self._save_return()
+            try:
+                result = await self.record_phone(payload)
+            except Exception:
+                found = await self.query_phone({k: v for k, v in binding.items() if k != "phase"})
+                if not isinstance(found, dict) or found.get("found") is not True:
+                    raise RuntimeError("phone history capture failed") from None
+                result = {key: found[key] for key in ("history_id", "native_timestamp")}
+            if (not isinstance(result, dict) or set(result) != {"history_id", "native_timestamp"}
+                    or not self._return_id(result["history_id"])
+                    or result["native_timestamp"] != candidate["native_timestamp"]):
+                raise RuntimeError("phone history acknowledgment invalid")
+            self.phone_baseline = {k: v for k, v in binding.items() if k != "phase"}
+            self._commit_native()
+            self.last_phone_receipt = {**self._receipt("phone"), **result, "grant": admission["grant"]}
+            self._expire_return()
+        except (Exception, asyncio.CancelledError) as error:
+            self._fail_native()
+            if not isinstance(error, asyncio.CancelledError) and self.latest_verified_phone is not None:
+                with contextlib.suppress(Exception):
+                    await self._freeze_handoff()
+            if isinstance(error, asyncio.CancelledError):
+                raise
+            raise RuntimeError("phone capture failed") from None
+
+    async def _phone_candidate(self):
+        pending = self.phone_pending
+        if pending is not None and pending["phase"] != "phone_forward_closed":
+            raise RuntimeError("phone writer outcome unknown")
+        if self.latest_verified_phone is not None and (
+                pending is None or self.latest_verified_phone["operation_id"] == pending["operation_id"]):
+            return self.latest_verified_phone
+        binding = pending or self.phone_baseline
+        if binding is None:
+            return None
+        if binding.get("request_digest") is None:
+            raise RuntimeError("phone target unavailable")
+        query = {k: v for k, v in binding.items() if k != "phase"}
+        result = await self.query_phone(query)
+        if (not isinstance(result, dict) or result.get("found") is not True
+                or any(result.get(key) != value for key, value in query.items())):
+            raise RuntimeError("phone target unavailable")
+        snapshots = result["snapshots"]
+        point = _point({"latitude": result["point"]["latitude"], "longitude": result["point"]["longitude"],
+                        "gps_accuracy": snapshots[self.person_id]["gps_accuracy"]}, self.person_id)
+        self._native_time(result["native_timestamp"])
+        return {"point": point, "snapshots": snapshots, "native_timestamp": result["native_timestamp"],
+                "operation_id": result["operation_id"]}
+
+    async def _freeze_handoff(self, *, candidate=None, key=None):
+        if self._handoff_pending():
+            return await self._finish_handoff()
+        candidate = candidate if candidate is not None else await self._phone_candidate()
+        self._fail_native()
+        if candidate is None:
+            if self.upstream_uncertain:
+                raise RuntimeError("native writer outcome unknown")
+            return None
+        if self.upstream_uncertain and (self.phone_pending is None
+                or self.phone_pending["phase"] != "phone_forward_closed"):
+            raise RuntimeError("native writer outcome unknown")
+        # The snapshot becomes Own only after admission was revoked, never during Normal.
+        point = {**candidate["point"], "gps_accuracy": 0}
+        self.handoff = {"id": uuid.uuid4().hex, "state": "prepared", "point": point,
+                        "native_timestamp": candidate["native_timestamp"],
+                        "operation_id": candidate["operation_id"], "key": key}
+        self.handoff_receipt = None
+        self._handoff_dirty = True
+        self.last_custom, self.last_operation = point, self._operation("handoff_" + self.handoff["id"], point)
+        self.phone_baseline = None
+        self.replay_required = True
+        self._commit_native(point=point, operation=self.last_operation)
+        return await self._finish_handoff()
+
+    async def _finish_handoff(self):
+        if not self._handoff_pending():
+            return self.handoff
+        if self.handoff["state"] == "applied" and not self.replay_required and not self.upstream_uncertain:
+            return self.handoff
+        if self.upstream_uncertain:
+            if self.phone_pending is not None and self.phone_pending["phase"] == "phone_forward_closed":
+                # A failed fsync of the frozen intent can be retried without any new phone write.
+                self._commit_native(point=self.handoff["point"], operation=self.last_operation)
+            elif not self._recoverable():
+                raise RuntimeError("native writer outcome unknown")
+            else:
+                return None  # Existing own recovery owns its closed intent.
+        point = self.handoff["point"]
+        if not await self.ready_native():
+            return None
+        if await self.verify_native(dict(point)):
+            self._begin_native(point=point, operation=self.last_operation)
+            await self._phase("location_closed")
+            receipt = await self._finish_custom(point, recovery=True)
+        else:
+            receipt = await self._publish_custom(point, self.last_operation)
+        self._complete_custom(point, self.last_operation, receipt)
+        return self.handoff
+
     async def _read_json(self, request):
         if request.headers.get("Content-Encoding", "identity") != "identity":
             raise ValueError("encoding")
@@ -600,10 +843,16 @@ class Gateway:
             raise
 
     def _commit_native(self, *, point=None, operation=None, receipt=None):
-        self._save(last_custom=self.last_custom if point is None else point,
-                   operation=self.last_operation if operation is None else operation,
-                   receipt=self.last_custom_receipt if receipt is None else receipt,
-                   pending=None, upstream_uncertain=False)
+        previous = self.phone_pending
+        self.phone_pending = None
+        try:
+            self._save(last_custom=self.last_custom if point is None else point,
+                       operation=self.last_operation if operation is None else operation,
+                       receipt=self.last_custom_receipt if receipt is None else receipt,
+                       pending=None, upstream_uncertain=False)
+        except BaseException:
+            self.phone_pending = previous
+            raise
         self.upstream_uncertain = False
         self.uncertainty_origin = self.pending_custom = None
 
@@ -636,8 +885,14 @@ class Gateway:
     async def _publish_custom(self, point, operation, *, replay=False, recovery=False):
         if not await self._ensure_registration():
             raise RuntimeError("registration changed or unavailable")
+        if self.handoff_enabled:
+            self.native_boot = await self.core_boot()
         returning = self.scheduled_return is not None and self.scheduled_return["state"] in {"due", "applied"}
-        if returning and not self.upstream_uncertain and await self.verify_native(dict(point)):
+        verified_same_own = (self.handoff_enabled and self.last_custom == point
+            and isinstance(self.last_custom_receipt, dict) and self.last_custom_receipt.get("verified") is True
+            and self.last_custom_receipt.get("origin") == "custom"
+            and (self.handoff is None or self.handoff["state"] != "prepared"))
+        if (returning or verified_same_own) and not self.upstream_uncertain and await self.verify_native(dict(point)):
             # Preserve Recorder state IDs when Own is already native (including pending DELETE).
             self._begin_native(point=point, operation=operation)
             await self._phase("location_closed")
@@ -664,6 +919,8 @@ class Gateway:
                 raise RuntimeError("invalid checkpoint phase")
             await self._phase(phase)
             closed = phase == "checkpoint_closed"
+        if self.handoff_enabled:
+            self.native_boot = await self.core_boot()
         if await self.checkpoint_native(dict(point), phase=checkpoint_phase) is False:
             raise RuntimeError("native checkpoint failed")
         if not closed:
@@ -673,6 +930,10 @@ class Gateway:
         return self._receipt("custom", replay=replay, recovery=recovery)
 
     def _complete_custom(self, point, operation, receipt):
+        if self.handoff_enabled:
+            self.phone_baseline = self.latest_verified_phone = None
+            if self.handoff is not None and self.handoff["state"] == "prepared" and self.handoff["point"] == point:
+                self.handoff = {**self.handoff, "state": "applied"}
         self._commit_native(point=point, operation=operation, receipt=receipt)
         self.last_custom, self.last_operation = point, operation
         self.last_custom_receipt, self.replay_required = receipt, False
@@ -707,6 +968,12 @@ class Gateway:
 
     async def replay_last_custom(self):
         async with self.lock:
+            if self.handoff_enabled and (self.phone_pending or self.phone_baseline or self._handoff_pending()):
+                try:
+                    return await self._freeze_handoff()
+                except Exception:
+                    self._fail_native()
+                    return None
             self.mode, self.normal_after, self.last_phone_receipt = "custom", None, None
             self.source_session = self.normal_grant = self.proven_phone = None
             if self.last_custom is None or self.upstream_uncertain:
@@ -731,6 +998,15 @@ class Gateway:
         if request.path in {"/health", "/control/status"} and request.method == "GET":
             await self._ensure_source_session()
             return web.json_response(self._status())
+        if request.path in {"/control/handoff", "/control/handoff/ack"}:
+            return await self._control_handoff(request)
+        if self._handoff_pending() or self._handoff_dirty:
+            return web.json_response({"error": "handoff pending", **self._status()}, status=503)
+        if (self.handoff_enabled and request.path == "/control/custom" and self.mode == "custom"
+                and (self.phone_pending or (self.phone_baseline and self.replay_required))):
+            async with self.lock:
+                await self._freeze_handoff()
+            return web.json_response({"error": "handoff requires acknowledgment", **self._status()}, status=503)
         if request.path in {"/control/return", "/control/return/ack"} and request.method == "POST":
             return await self._control_return(request)
         if request.method != "POST" or request.path not in {"/control/custom", "/control/normal"}:
@@ -806,6 +1082,89 @@ class Gateway:
             receipt = await self._publish_custom(point, operation)
             self._complete_custom(point, operation, receipt)
             return web.json_response({"receipt": receipt, "idempotent": False})
+
+    async def _control_handoff(self, request):
+        if not self.handoff_enabled:
+            return web.json_response({"error": "handoff unavailable"}, status=503)
+        if request.path == "/control/handoff" and request.method == "GET":
+            return web.json_response({"handoff": self.handoff})
+        ack = request.path == "/control/handoff/ack"
+        if request.method != "POST":
+            return web.json_response({"error": "unsupported control"}, status=405)
+        body = await self._read_json(request)
+        if (not isinstance(body, dict) or set(body) != {"source_session", "idempotency_key", "expected_id"}
+                or not self._return_id(body["source_session"]) or not self._return_id(body["idempotency_key"])
+                or (body["expected_id"] is not None and not self._return_id(body["expected_id"]))):
+            raise ValueError("handoff schema")
+        if self.source_control_check is not None and not await self.source_control_check(body["source_session"]):
+            return web.json_response({"error": "source control session unavailable"}, status=503)
+        current = self.handoff["id"] if self.handoff else None
+        retry = (self._handoff_pending() and self.handoff.get("key") == body["idempotency_key"])
+        previous = self.handoff_receipt
+        if body["expected_id"] != current and not retry and not (
+                previous and previous["key"] == body["idempotency_key"]):
+            return web.json_response({"error": "handoff changed"}, status=409)
+        # Revoke before waiting for an already admitted phone holding the native writer.
+        if not ack:
+            self._fail_native()
+        async with self.lock:
+            if self.source_control_check is not None and not await self.source_control_check(body["source_session"]):
+                return web.json_response({"error": "source control session unavailable"}, status=503)
+            current = self.handoff["id"] if self.handoff else None
+            digest = self._request_digest({"ack": ack, "expected_id": body["expected_id"]})
+            previous = self.handoff_receipt
+            if previous and previous["key"] == body["idempotency_key"]:
+                if previous["digest"] != digest or previous["to_id"] != current:
+                    return web.json_response({"error": "idempotency conflict"}, status=409)
+                if self._handoff_dirty:
+                    self._save_return()
+                return web.json_response(self._status())
+            if not ack and self._handoff_pending() and self.handoff.get("key") == body["idempotency_key"]:
+                await self._finish_handoff()
+                return web.json_response(self._status())
+            if body["expected_id"] != current:
+                return web.json_response({"error": "handoff changed"}, status=409)
+            if ack:
+                if (self.handoff is None or self.handoff["state"] != "applied" or self.upstream_uncertain
+                        or self.replay_required or not await self.verify_native(dict(self.last_custom))):
+                    return web.json_response({"error": "handoff not applied"}, status=409)
+                self.handoff = {"id": uuid.uuid4().hex, "state": "idle"}
+                self.handoff_receipt = {"key": body["idempotency_key"], "digest": digest, "to_id": self.handoff["id"]}
+                self._handoff_dirty = True
+                self._save_return()
+            else:
+                await self._freeze_handoff(key=body["idempotency_key"])
+            return web.json_response(self._status())
+
+    async def legacy_barrier(self, checkpoint_sha256, core_boot, target):
+        """Called only by the one-shot authenticated manager after its stopped-Core proof."""
+        if (self.handoff is not None and self.handoff.get("key") == "legacy_barrier_" + checkpoint_sha256
+                and await self.core_boot() == core_boot):
+            if (not isinstance(target, dict) or self.handoff["native_timestamp"] != target.get("timestamp")
+                    or any(self.handoff["point"][key] != target.get(key) for key in ("latitude", "longitude"))):
+                raise ValueError("legacy barrier conflict")
+            return await self._finish_handoff()
+        if (not self.handoff_enabled or self.native_target is None or not self.upstream_uncertain
+                or self.uncertainty_origin != "phone"
+                or self.phone_pending is not None or self._handoff_pending()
+                or hashlib.sha256(self.checkpoint_path.read_bytes()).hexdigest() != checkpoint_sha256
+                or await self.core_boot() != core_boot):
+            raise ValueError("legacy barrier identity")
+        candidate = await self.native_target()
+        if not isinstance(target, dict) or set(target) != {"latitude", "longitude", "timestamp"}:
+            raise ValueError("legacy barrier target")
+        self._native_time(target["timestamp"])
+        if any(type(target[key]) not in {int, float} or not math.isfinite(target[key])
+               or abs(target[key] - candidate["point"][key]) >= 1e-8 for key in ("latitude", "longitude")):
+            raise ValueError("legacy barrier target mismatch")
+        candidate = {**candidate, "native_timestamp": target["timestamp"]}
+        self._fail_native()
+        # The manager attests termination of the old Core process, not a mere network timeout.
+        self.phone_pending = {"operation_id": uuid.uuid4().hex, "grant": "legacy_barrier",
+                              "source_session": "legacy_barrier", "core_boot": core_boot,
+                              "request_digest": None, "phase": "phone_forward_closed"}
+        self.latest_verified_phone = candidate
+        await self._freeze_handoff(candidate=candidate, key="legacy_barrier_" + checkpoint_sha256)
 
     async def _control_return(self, request):
         ack = request.path == "/control/return/ack"
@@ -1013,12 +1372,16 @@ class Gateway:
                     if kind == "blocked" or (kind == "location" and self._mode() != "normal"):
                         return web.json_response({} if self.production_mode else {"blocked": True, "mode": self._mode()})
                     if kind == "location":
-                        admission = self._begin_phone()
+                        expected = await self._prepare_phone()
+                        admission = self._begin_phone(expected)
                         if admission is None:
                             return web.json_response({} if self.production_mode else {"blocked": True, "mode": self._mode()})
                     status, data, headers = await self._http_forward(request, body)
                     if kind == "location":
-                        if not 200 <= status < 300 or not await self.verify_native(dict(point)):
+                        if not 200 <= status < 300:
+                            raise RuntimeError("phone response failed")
+                        self._phone_forward_closed()
+                        if not await self.verify_native(dict(point)):
                             raise RuntimeError("phone readback failed")
                         await self._finish_phone(point, admission)
                     return web.Response(status=status, body=data, headers=headers)
@@ -1165,7 +1528,8 @@ class Gateway:
                 pending[identifier] = (future, registration_id)
                 try:
                     if category == "location":
-                        admission = self._begin_phone()
+                        expected = await self._prepare_phone()
+                        admission = self._begin_phone(expected)
                         if admission is None:
                             await downstream.send_json({"id": identifier, "type": "result", "success": True,
                                 "result": {"status": 200, "body": '{}' if self.production_mode else '{"blocked":true}',
@@ -1175,7 +1539,10 @@ class Gateway:
                     response = await asyncio.wait_for(future, self.upstream_timeout_seconds)
                     if category == "location":
                         status = response.get("result", {}).get("status", 0)
-                        if not response.get("success") or not 200 <= status < 300 or not await self.verify_native(dict(point)):
+                        if not response.get("success") or not 200 <= status < 300:
+                            raise RuntimeError("phone WS response failed")
+                        self._phone_forward_closed()
+                        if not await self.verify_native(dict(point)):
                             raise RuntimeError("phone WS readback failed")
                         await self._finish_phone(point, admission)
                     await downstream.send_json(response)
