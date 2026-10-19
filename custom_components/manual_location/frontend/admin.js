@@ -1,8 +1,8 @@
-import { activityPayload, activitySettings, adminPersonOptions, callWS, editHistory, errorText, localDateInput, readPoint, removeHistory } from "./data.js?v=2.0.1";
-import { L, makeMap, mapStyles, popup } from "./map-common.js?v=2.0.1";
-import { registerReloadBlocker, startUpdateCheck } from "./updates.js?v=2.0.1";
-import "./scenarios.js?v=2.0.1";
-import "./place-search.js?v=2.0.1";
+import { activityPayload, activitySettings, adminPersonOptions, callWS, editHistory, errorText, localDateInput, readPoint, removeHistory } from "./data.js?v=2.0.2";
+import { L, makeMap, mapStyles, popup } from "./map-common.js?v=2.0.2";
+import { registerReloadBlocker, startUpdateCheck } from "./updates.js?v=2.0.2";
+import "./scenarios.js?v=2.0.2";
+import "./place-search.js?v=2.0.2";
 
 const DRAFT_COLOR = "#7c3aed";
 const CUSTOM_COLOR = "#1976d2";
@@ -34,6 +34,8 @@ export class ManualLocationAdmin extends HTMLElement {
     this._historySelectionGeneration = 0;
     this._historyChecks = [];
     this._historyOlderCount = 0;
+    this._historyShowHa = true;
+    this._historyShowCustom = true;
     this._haHistory = null;
     this._haSelection = new Set();
     this._haGeneration = 0;
@@ -41,7 +43,7 @@ export class ManualLocationAdmin extends HTMLElement {
     this._scenarioView = { selectedByEntity: {}, personFilter: "", statusFilter: "", nextLocal: 0 };
     const markEditing = (event) => {
       if (["manual-location-scenarios", "manual-location-place-search"].includes(event.target?.tagName?.toLowerCase())) return;
-      if (["person", "person-enabled", "person-ha", "global-enabled", "pin", "new-pin", "ha-delete-start", "ha-delete-end", "ha-delete-custom"].includes(event.target?.id) || event.target?.id?.startsWith("history-select-") || event.target?.id?.startsWith("ha-history-select-")
+      if (["person", "person-enabled", "person-ha", "global-enabled", "pin", "new-pin", "ha-delete-start", "ha-delete-end", "ha-delete-custom", "history-show-ha", "history-show-custom"].includes(event.target?.id) || event.target?.id?.startsWith("history-select-") || event.target?.id?.startsWith("ha-history-select-")
         || event.target?.id?.startsWith("activity-")) return;
       this._editing = true; this._syncScenarios(); this._syncHistorySelection(); this._syncLocationButtons(); this._placeSearch?.sync?.();
     };
@@ -250,7 +252,7 @@ export class ManualLocationAdmin extends HTMLElement {
       if (epoch === this._epoch && token === this._token && !this._busy && !this._scenarios?.busy && !this._hasDrafts()) {
         if (snapshot.revision !== this._snapshot.revision || JSON.stringify(snapshot.scenarios) !== JSON.stringify(this._snapshot.scenarios)) this._acceptScenarioSnapshot(snapshot);
         else if (this._historyWindowMinute !== Math.floor(Date.now() / 60000)) { this._refreshHistory(); this._drawPerson(); }
-        if (!this._historyOlderCount && !this._haSelection.size && !this._haHistory?.error && Date.now() - (this._haHistory?.loadedAt || 0) >= 30000) this._refreshHaHistory();
+        if (this._historyShowHa && !this._historyOlderCount && !this._haSelection.size && !this._haHistory?.error && Date.now() - (this._haHistory?.loadedAt || 0) >= 30000) this._refreshHaHistory();
       }
     } catch (error) {
       if (epoch !== this._epoch || token !== this._token) return;
@@ -307,6 +309,7 @@ export class ManualLocationAdmin extends HTMLElement {
       @media(max-width:900px){.layout{grid-template-columns:1fr}.sidebar{display:grid;grid-template-columns:1fr 1fr}.history-editor{grid-template-columns:1fr 1fr}.map{height:340px}}@media(max-width:580px){main{padding:22px 14px 36px}header{align-items:flex-start}h1{font-size:27px}.sidebar{display:flex}.box{padding:18px}.mapbox{padding:0}.history-editor{grid-template-columns:1fr 1fr}.history-editor .timefield{grid-column:1/-1}.footer{align-items:flex-start;flex-direction:column}.row{align-items:flex-start}.map{height:290px}}
       .map-edit-tools{padding:14px 18px;border-top:2px solid #c65d00;background:#c65d0010}.map-edit-tools p{margin:0 0 10px;font-size:13px;line-height:1.5}.map-edit-tools .actions{align-items:center}.leaflet-tooltip.edit-point-tooltip{white-space:normal;max-width:220px;border-color:#c65d00}
       @media(max-width:580px){#ha-delete-range-fields .pair{grid-template-columns:1fr}}
+      .history-filters{display:flex;flex-wrap:wrap;gap:12px 22px;margin:14px 0 8px}.history-filters .toggle{margin:0}.history-filters #history-show-ha{accent-color:#168447}.history-filters #history-show-custom{accent-color:#1976d2}
       .leaflet-tooltip.device-location-tooltip{width:180px;white-space:normal;text-align:center}
       .leaflet-tooltip.history-selection-tooltip{max-width:230px;white-space:normal;text-align:center;background:#fff5b8;color:#172b4d;border:2px solid #172b4d;font-weight:600}.history-selection-times{max-height:190px;overflow:auto;margin-top:6px}
       .layout>*,.sidebar>*,.field,input{min-width:0}.scroll{position:relative}.row>div:first-child{min-width:0;overflow-wrap:anywhere}.row .actions{flex-shrink:0}.trash{width:40px;display:grid;place-items:center}.savebar{display:flex;align-items:center;justify-content:space-between;gap:12px;flex-wrap:wrap;margin:16px 0 12px}@media(max-width:580px){.savebar{flex-direction:column;align-items:stretch}.savebar #save{order:1}}.savebar span{font-size:13px;color:var(--secondary-text-color,#657a82)}.row.draft{background:#7c3aed14;border-left:3px solid #7c3aed;padding-left:10px;padding-right:10px}.draft-badge,.current-badge{display:inline-block;margin-top:6px;font-size:12px;font-weight:700}.draft-badge::before,.current-badge::before{content:"";display:inline-block;width:8px;height:8px;border-radius:50%;background:#7c3aed;margin-right:6px}
@@ -322,7 +325,7 @@ export class ManualLocationAdmin extends HTMLElement {
       <div class="layout"><aside class="sidebar"><section class="box"><h2 id="person-title">Ustawienia osoby</h2><div class="field"><label for="person">Edytujesz ustawienia osoby</label><select id="person"></select></div><fieldset class="source-options"><legend id="person-source-legend">Źródło lokalizacji na mapach</legend><label class="toggle source-choice"><input type="radio" name="person-source" id="person-ha"><span>Home Assistant<small id="person-ha-help">Pozycja i historia z HA</small></span></label><label class="toggle source-choice"><input type="radio" name="person-source" id="person-enabled"><span>Ręczna (custom)<small id="person-custom-help">Pozycje przygotowane w tym panelu</small></span></label></fieldset><p class="source-status" id="person-source-status" role="status"></p><p class="source-pending" id="person-source-pending" role="status" hidden></p><p class="sub source-help" id="person-source-help"></p><p class="notice" id="missing-person-notice" hidden>Tej osoby nie ma już w Home Assistant. Usuń jej ustawienia poniżej, a następnie zapisz wszystkie zmiany. Pozostałe osoby zachowają swoje ustawienia.</p><div class="field" style="margin-top:18px"><label for="person-nickname">Pseudonim na ekranie PIN</label><input id="person-nickname" maxlength="40" autocomplete="off"></div><label class="toggle"><input type="checkbox" id="quick-target"><span>Szybki zapis na ekranie PIN dla tej osoby</span></label><p class="sub">Jedna przypisana osoba na wszystkich urządzeniach. Zapisz wszystkie zmiany, aby zastosować pseudonim i przypisanie.</p><button class="wide danger" id="remove-person">Usuń ustawienia tej osoby</button></section>
       <section class="box"><h2 id="activity-title">Aktywność telefonu</h2><p class="sub activity-context">Osobne ustawienia tej osoby, niezależne od źródła lokalizacji. Te same zaznaczenia mogą oznaczać takie same ustawienia domyślne.</p><label class="toggle"><input type="checkbox" id="activity-enabled"><span>Pokaż kropkę i czas dla tej osoby</span></label><p class="sub">Zielona przez godzinę od aktywności, potem czerwona. Brak świeżych danych oznacza szarą kropkę. To wskazówka, czy można napisać, a nie potwierdzenie snu.</p><div style="margin-top:18px"><label class="toggle"><input type="checkbox" id="activity-unlock"><span>Odblokowanie<small>Ekran aktywny i telefon odblokowany</small></span></label><label class="toggle"><input type="checkbox" id="activity-walking"><span>Rozpoznane chodzenie lub bieg<small>Wymaga rozpoznanego chodzenia lub biegu</small></span></label><label class="toggle"><input type="checkbox" id="activity-screen"><span>Włączenie ekranu<small>Może zadziałać także po powiadomieniu</small></span></label><label class="toggle"><input type="checkbox" id="activity-tilting"><span>Poruszenie / przechylenie telefonu<small>Wykryte przez Companion; ruch w kieszeni lub aucie też może zadziałać</small></span></label></div><div class="field" style="margin-top:18px"><label for="activity-match">Kiedy pokazać zieloną kropkę?</label><select id="activity-match"><option value="any">Dowolny wybrany sygnał</option><option value="all">Wszystkie wybrane sygnały</option></select><p class="sub">Liczy się ostatnia godzina. W trybie „Wszystkie” sygnały nie muszą wystąpić jednocześnie.</p></div><label class="toggle"><input type="checkbox" id="activity-manual"><span>Ustaw czerwoną do odwołania</span></label><div class="field" style="margin-top:14px"><label for="activity-since">Data i godzina ostatniej aktywności</label><input id="activity-since" type="datetime-local" step="1"></div><p class="sub">Czerwona pojawi się od razu po zapisaniu, z podanym czasem. Wyłącz przełącznik, aby wrócić do automatu.</p><p class="sub">Automat korzysta z czujników Companion włączonych przez właściciela telefonu: Interactive, Keyguard locked i Detected activity. Te ustawienia nie włączają czujników ani uprawnień Androida. Użyj wspólnego przycisku „Zapisz wszystkie zmiany”.</p><button class="wide" id="activity-reset">Przywróć domyślne dla aktywności</button></section>
       <section class="box"><h2>Bieżąca pozycja</h2><p class="current-summary" id="current-summary"></p><div class="field"><button class="wide" id="use-device-location">Użyj lokalizacji tego urządzenia</button><p class="sub">Jednorazowy odczyt z telefonu lub komputera, na którym otwarto panel. Wymaga zgody na lokalizację; dokładność zależy od urządzenia.</p><button class="wide gps-save" id="use-device-location-save" aria-describedby="gps-save-help">Pobierz GPS i zapisz pozycję</button><p class="sub" id="gps-save-help">GPS → bieżąca pozycja i historia → zapis jednym kliknięciem. Najpierw zapisz lub odrzuć pozostałe zmiany. Ręczna zmiana zatrzymuje aktywny plan tej osoby.</p></div><div class="pair"><div class="field"><label for="current-lat">Szerokość</label><input id="current-lat" type="number" step="any" min="-90" max="90"></div><div class="field"><label for="current-lon">Długość</label><input id="current-lon" type="number" step="any" min="-180" max="180"></div></div><button class="wide" id="set-current">Ustaw bieżącą pozycję</button><p class="sub">Każde ustawienie dodaje osobny szkic z godziną. Przed zapisem możesz zmienić jego czas i współrzędne albo go usunąć.</p></section></aside>
-      <section><div class="box mapbox"><manual-location-place-search id="admin-place-search"></manual-location-place-search><div class="map" id="map" aria-label="Mapa wyboru pozycji"></div><div class="caption">Kliknij mapę, aby uzupełnić współrzędne. Następnie ustaw pozycję lub dodaj punkt historii.</div><div class="map-edit-tools" id="map-edit-tools" hidden><p id="map-edit-status" role="status"></p><div class="actions"><button class="primary" id="apply-map-edit" type="submit" form="history-form">Zastosuj edycję</button><button id="cancel-map-edit" type="button">Anuluj edycję</button></div></div></div><section class="box history"><div class="history-top"><h2>Historia</h2><span class="eyebrow" id="count"></span></div><p class="sub">Od najnowszych do najstarszych. Kolory źródeł są widoczne tylko w tym panelu.</p><div class="history-legend" aria-label="Źródła historii"><span class="custom">Custom</span><span class="ha">Historia HA</span><span class="draft">Niezapisany szkic</span></div><p class="sub">Custom edytujesz i usuwasz przez „Zapisz wszystkie zmiany”. Usunięcie historii HA wymaga osobnego podglądu i potwierdzenia.</p><div class="template-tools ha-history-tools" id="ha-history-tools" hidden><span id="ha-history-status" role="status"></span><button id="ha-history-reload" type="button">Odśwież historię HA</button><button id="ha-history-delete" class="danger" type="button">Usuń zaznaczone HA</button><button id="ha-history-clear" type="button">Wyczyść zaznaczenie HA</button></div><p class="sub" id="ha-history-help" hidden></p><details id="ha-delete-range-fields" hidden><summary>Usuń historię z przedziału</summary><p class="sub">Wszystkie zapisy wybranej osoby i jej przypisanego telefonu, także niewczytane na listę. Daty są lokalne, granice włączne. Domyślnie punkty Custom pozostaną.</p><div class="pair" style="margin-top:12px"><div class="field"><label for="ha-delete-start">Od</label><input id="ha-delete-start" type="datetime-local" step="1"></div><div class="field"><label for="ha-delete-end">Do</label><input id="ha-delete-end" type="datetime-local" step="1"></div></div><label class="toggle field"><input id="ha-delete-custom" type="checkbox"><span>Uwzględnij również punkty customowe<small>Z historii w podanym przedziale. Bieżąca własna pozycja pozostanie aktywna.</small></span></label><button class="danger" id="ha-delete-range" type="button">Usuń wszystkie HA z przedziału</button><p class="sub">Najwyżej 31 dni w jednej operacji. Przed usunięciem zobaczysz podgląd i potwierdzisz zakres.</p></details><div class="template-tools"><span id="history-range" role="status"></span><button id="history-more" type="button">Pokaż starsze</button><button id="history-recent" type="button" hidden>Ostatnie 48 godzin</button></div><div class="template-tools"><span id="history-selection-count" role="status"></span><button id="history-template" type="button">Utwórz szablon trasy</button><button id="history-selection-clear" type="button">Wyczyść zaznaczenie</button></div><p class="sub template-hint" id="history-template-hint"></p><div class="scroll" id="history-list"></div><div id="history-editor-home"><form id="history-form" class="history-editor"><h3 id="history-edit-title" hidden>Edycja punktu</h3><div class="field"><label for="history-lat">Szerokość</label><input id="history-lat" type="number" step="any" min="-90" max="90" required></div><div class="field"><label for="history-lon">Długość</label><input id="history-lon" type="number" step="any" min="-180" max="180" required></div><div class="field timefield"><label for="history-time">Lokalna data i godzina</label><input id="history-time" type="datetime-local" step="1" required></div><label class="toggle history-current"><input id="history-current" type="checkbox"><span>Ustaw także jako bieżącą pozycję<small>Zachowa godzinę punktu. Mapy zaktualizują się po zapisaniu wszystkich zmian. Ręczna zmiana zatrzyma aktywny plan tej osoby.</small></span></label><div class="actions"><button id="add-history" type="submit">Dodaj punkt</button><button id="cancel-edit" type="button" hidden>Anuluj edycję punktu</button></div></form></div></section></section></div>
+      <section><div class="box mapbox"><manual-location-place-search id="admin-place-search"></manual-location-place-search><div class="map" id="map" aria-label="Mapa wyboru pozycji"></div><div class="caption">Kliknij mapę, aby uzupełnić współrzędne. Następnie ustaw pozycję lub dodaj punkt historii.</div><div class="map-edit-tools" id="map-edit-tools" hidden><p id="map-edit-status" role="status"></p><div class="actions"><button class="primary" id="apply-map-edit" type="submit" form="history-form">Zastosuj edycję</button><button id="cancel-map-edit" type="button">Anuluj edycję</button></div></div></div><section class="box history"><div class="history-top"><h2>Historia</h2><span class="eyebrow" id="count"></span></div><p class="sub">Od najnowszych do najstarszych. Kolory źródeł są widoczne tylko w tym panelu.</p><div class="history-legend" aria-label="Źródła historii"><span class="custom">Custom</span><span class="ha">Historia HA</span><span class="draft">Niezapisany szkic</span></div><div class="history-filters" aria-label="Widoczność historii"><label class="toggle"><input id="history-show-ha" type="checkbox" checked><span>Pokaż HA</span></label><label class="toggle"><input id="history-show-custom" type="checkbox" checked><span>Pokaż custom</span></label></div><p class="sub">Filtry zmieniają tylko listę i podgląd historii; niczego nie usuwają. Bieżący punkt, szkice, edytowany punkt i wpisy do usunięcia pozostają na liście.</p><p class="sub" id="history-visibility-status" role="status"></p><p class="sub">Custom edytujesz i usuwasz przez „Zapisz wszystkie zmiany”. Usunięcie historii HA wymaga osobnego podglądu i potwierdzenia.</p><div class="template-tools ha-history-tools" id="ha-history-tools" hidden><span id="ha-history-status" role="status"></span><button id="ha-history-reload" type="button">Odśwież historię HA</button><button id="ha-history-delete" class="danger" type="button">Usuń zaznaczone HA</button><button id="ha-history-clear" type="button">Wyczyść zaznaczenie HA</button></div><p class="sub" id="ha-history-help" hidden></p><details id="ha-delete-range-fields" hidden><summary>Usuń historię z przedziału</summary><p class="sub">Wszystkie zapisy wybranej osoby i jej przypisanego telefonu, także niewczytane na listę. Daty są lokalne, granice włączne. Domyślnie punkty Custom pozostaną. Filtry widoczności nie ograniczają usuwania, także ukrytych wpisów.</p><div class="pair" style="margin-top:12px"><div class="field"><label for="ha-delete-start">Od</label><input id="ha-delete-start" type="datetime-local" step="1"></div><div class="field"><label for="ha-delete-end">Do</label><input id="ha-delete-end" type="datetime-local" step="1"></div></div><label class="toggle field"><input id="ha-delete-custom" type="checkbox"><span>Uwzględnij również punkty customowe<small>Z historii w podanym przedziale. Bieżąca własna pozycja pozostanie aktywna.</small></span></label><button class="danger" id="ha-delete-range" type="button">Usuń wszystkie HA z przedziału</button><p class="sub">Najwyżej 31 dni w jednej operacji. Przed usunięciem zobaczysz podgląd i potwierdzisz zakres.</p></details><div class="template-tools"><span id="history-range" role="status"></span><button id="history-more" type="button">Pokaż starsze</button><button id="history-recent" type="button" hidden>Ostatnie 48 godzin</button></div><div class="template-tools"><span id="history-selection-count" role="status"></span><button id="history-template" type="button">Utwórz szablon trasy</button><button id="history-selection-clear" type="button">Wyczyść zaznaczenie</button></div><p class="sub template-hint" id="history-template-hint"></p><div class="scroll" id="history-list"></div><div id="history-editor-home"><form id="history-form" class="history-editor"><h3 id="history-edit-title" hidden>Edycja punktu</h3><div class="field"><label for="history-lat">Szerokość</label><input id="history-lat" type="number" step="any" min="-90" max="90" required></div><div class="field"><label for="history-lon">Długość</label><input id="history-lon" type="number" step="any" min="-180" max="180" required></div><div class="field timefield"><label for="history-time">Lokalna data i godzina</label><input id="history-time" type="datetime-local" step="1" required></div><label class="toggle history-current"><input id="history-current" type="checkbox"><span>Ustaw także jako bieżącą pozycję<small>Zachowa godzinę punktu. Mapy zaktualizują się po zapisaniu wszystkich zmian. Ręczna zmiana zatrzyma aktywny plan tej osoby.</small></span></label><div class="actions"><button id="add-history" type="submit">Dodaj punkt</button><button id="cancel-edit" type="button" hidden>Anuluj edycję punktu</button></div></form></div></section></section></div>
       <manual-location-scenarios></manual-location-scenarios>
       <details class="pin-change"><summary>Zmień PIN administratora</summary><form id="pin-form"><div class="field"><label for="new-pin">Nowy PIN (4–12 znaków: litery A–Z, a–z lub cyfry)</label><input id="new-pin" type="password" pattern="[A-Za-z0-9]{4,12}" minlength="4" maxlength="12" autocomplete="off" required></div><button type="submit">Zmień PIN i zablokuj sesje</button></form></details>`}</main>`;
     if (this._deviceToast) {
@@ -448,6 +451,10 @@ export class ManualLocationAdmin extends HTMLElement {
     this.shadowRoot.querySelector("#history-selection-clear").addEventListener("click", () => this._clearHistorySelection());
     this.shadowRoot.querySelector("#history-more").addEventListener("click", () => this._changeHistoryRange(false));
     this.shadowRoot.querySelector("#history-recent").addEventListener("click", () => this._changeHistoryRange(true));
+    for (const [id, shown] of [["history-show-ha", this._historyShowHa], ["history-show-custom", this._historyShowCustom]]) {
+      const checkbox = this.shadowRoot.querySelector(`#${id}`); checkbox.checked = shown;
+      checkbox.addEventListener("change", () => this._changeHistoryVisibility());
+    }
     this.shadowRoot.querySelector("#ha-history-reload").addEventListener("click", () => this._refreshHaHistory());
     this.shadowRoot.querySelector("#ha-history-delete").addEventListener("click", () => this._deleteHaHistory());
     this.shadowRoot.querySelector("#ha-history-clear").addEventListener("click", () => { this._haSelection.clear(); this._syncHaHistory(); });
@@ -778,20 +785,31 @@ export class ManualLocationAdmin extends HTMLElement {
   _historyWindow(rows = this._historyRows()) {
     const cutoff = Date.now() - 48 * 3600000;
     const keep = (row) => row.current || row.draft || row.deleted || (row.index >= 0 && row.index === this._editIndex);
-    const frontier = this._haHistory?.hasMore ? Date.parse(this._haHistory.rows.at(-1)?.timestamp) : NaN;
-    const available = rows.filter((row) => keep(row) || row.source === "ha" || !Number.isFinite(frontier) || Date.parse(row.point.timestamp) >= frontier);
+    const visible = rows.filter((row) => keep(row) || (row.source === "ha" ? this._historyShowHa : this._historyShowCustom));
+    const frontier = this._historyShowHa && this._haHistory?.hasMore ? Date.parse(this._haHistory.rows.at(-1)?.timestamp) : NaN;
+    const available = visible.filter((row) => keep(row) || row.source === "ha" || !Number.isFinite(frontier) || Date.parse(row.point.timestamp) >= frontier);
     const older = available.filter((row) => !keep(row) && Date.parse(row.point.timestamp) < cutoff);
     const shown = new Set(older.slice(0, this._historyOlderCount));
     return { rows: available.filter((row) => keep(row) || Date.parse(row.point.timestamp) >= cutoff || shown.has(row)),
-      hidden: Math.max(0, older.length - this._historyOlderCount) + rows.length - available.length };
+      hidden: Math.max(0, older.length - this._historyOlderCount) + visible.length - available.length,
+      filtered: rows.length - visible.length };
+  }
+  _changeHistoryVisibility() {
+    if (!this._token || !this._snapshot) return;
+    this._historyShowHa = this.shadowRoot.querySelector("#history-show-ha").checked;
+    this._historyShowCustom = this.shadowRoot.querySelector("#history-show-custom").checked;
+    if (!this._historyShowHa) this._haSelection.clear();
+    if (!this._historyShowCustom) this._historySelection.clear();
+    this._refreshHistory();
+    this._drawPerson();
   }
   _changeHistoryRange(recent) {
     if (this._busy || this._scenarios?.busy) return;
-    if (recent) { this._historyOlderCount = 0; this._refreshHaHistory(); }
+    if (recent) { this._historyOlderCount = 0; if (this._historyShowHa) this._refreshHaHistory(); }
     else {
-      const recentHa = this._haHistory?.hasMore && Date.parse(this._haHistory.rows.at(-1)?.timestamp) >= Date.now() - 48 * 3600000;
+      const recentHa = this._historyShowHa && this._haHistory?.hasMore && Date.parse(this._haHistory.rows.at(-1)?.timestamp) >= Date.now() - 48 * 3600000;
       if (!recentHa) this._historyOlderCount += 100;
-      if (this._haHistory?.hasMore) this._loadHaHistory();
+      if (this._historyShowHa && this._haHistory?.hasMore) this._loadHaHistory();
     }
     this._refreshHistory();
     this._drawPerson();
@@ -988,7 +1006,7 @@ export class ManualLocationAdmin extends HTMLElement {
     } catch { finish(null, {}); }
   }
   _historyTemplateAllowed() {
-    return this._placeAllowed() && !this._dirty && !this._editing && this._editIndex < 0 && !Object.keys(this._removedCurrent).length;
+    return this._historyShowCustom && this._placeAllowed() && !this._dirty && !this._editing && this._editIndex < 0 && !Object.keys(this._removedCurrent).length;
   }
   _savedHistoryPoints() {
     const saved = this._savedSnapshot?.persons[this._selected];
@@ -1021,7 +1039,7 @@ export class ManualLocationAdmin extends HTMLElement {
     if (!this._map || !this._historySelection.size || !this._token || !this._hass?.user?.is_admin
       || this._hass.connected === false || !this._hass.states[this._selected]) return;
     const saved = new Set(this._savedHistoryPoints().map(templateKey)), places = new Map();
-    for (const { point, draft, source } of this._historyRows()) {
+    for (const { point, draft, source } of this._historyWindow().rows) {
       if (source === "ha") continue;
       const key = templateKey(point);
       if (draft || !this._historySelection.has(key) || !saved.has(key)) continue;
@@ -1078,21 +1096,27 @@ export class ManualLocationAdmin extends HTMLElement {
     const window = this._historyWindow([...live, ...removed.map((point) => ({ point, index: -1, source: "custom", deleted: true }))]
       .sort((a, b) => Date.parse(b.point.timestamp) - Date.parse(a.point.timestamp)));
     const history = window.rows;
-    const eligible = new Set(history.filter((row) => row.source !== "ha" && !row.draft && !row.deleted && saved.has(templateKey(row.point))).map((row) => templateKey(row.point)));
+    const eligible = new Set(history.filter((row) => this._historyShowCustom && row.source !== "ha" && !row.draft && !row.deleted && saved.has(templateKey(row.point))).map((row) => templateKey(row.point)));
     for (const key of this._historySelection) if (!eligible.has(key)) this._historySelection.delete(key);
     this._historyChecks = [];
     const haEligible = new Set(history.filter((row) => row.source === "ha").map((row) => haKey(row.ha)));
     for (const key of this._haSelection) if (!haEligible.has(key)) this._haSelection.delete(key);
     this._haChecks = [];
     this.shadowRoot.querySelector("#count").textContent = `${history.length - removed.length} z ${live.length} punktów${removed.length ? ` · ${removed.length} do usunięcia` : ""}`;
+    const visibility = this.shadowRoot.querySelector("#history-visibility-status");
+    visibility.hidden = this._historyShowHa && this._historyShowCustom;
+    visibility.textContent = !this._historyShowHa && !this._historyShowCustom
+      ? "Oba źródła ukryte; bieżąca pozycja i niezapisane zmiany pozostają widoczne."
+      : `Ukryte filtrem: ${window.filtered}.`;
     this.shadowRoot.querySelector("#history-range").textContent = this._historyOlderCount
       ? "Ostatnie 48 godzin i odsłonięte starsze wpisy. Bieżąca pozycja i niezapisane zmiany są zawsze widoczne."
       : "Ostatnie 48 godzin. Bieżąca pozycja i niezapisane zmiany są zawsze widoczne.";
     const more = this.shadowRoot.querySelector("#history-more");
-    more.hidden = !window.hidden && !this._haHistory?.hasMore;
-    const recentHa = this._haHistory?.hasMore && Date.parse(this._haHistory.rows.at(-1)?.timestamp) >= Date.now() - 48 * 3600000;
-    more.textContent = recentHa ? "Pokaż kolejne wpisy HA" : this._haHistory?.hasMore ? "Pokaż starsze (kolejna partia)" : `Pokaż starsze (${Math.min(100, window.hidden)})`;
-    more.disabled = !!(this._haHistory?.loading || this._haHistory?.error);
+    const moreHa = this._historyShowHa && this._haHistory?.hasMore;
+    more.hidden = !window.hidden && !moreHa;
+    const recentHa = moreHa && Date.parse(this._haHistory.rows.at(-1)?.timestamp) >= Date.now() - 48 * 3600000;
+    more.textContent = recentHa ? "Pokaż kolejne wpisy HA" : moreHa ? "Pokaż starsze (kolejna partia)" : `Pokaż starsze (${Math.min(100, window.hidden)})`;
+    more.disabled = this._historyShowHa && !!(this._haHistory?.loading || this._haHistory?.error);
     this.shadowRoot.querySelector("#history-recent").hidden = !this._historyOlderCount;
     this._historyWindowMinute = Math.floor(Date.now() / 60000);
     this.shadowRoot.querySelector("#add-history").textContent = this._editIndex < 0 ? "Dodaj punkt" : "Zastosuj edycję";
@@ -1110,7 +1134,8 @@ export class ManualLocationAdmin extends HTMLElement {
     if (!history.length) {
       const empty = document.createElement("div");
       empty.className = "empty";
-      empty.textContent = live.length ? "Brak punktów w ostatnich 48 godzinach. Wybierz Pokaż starsze, aby zobaczyć wcześniejsze wpisy." : "Brak ręcznych punktów tej osoby.";
+      empty.textContent = window.filtered ? "Historia jest ukryta filtrami. Włącz Pokaż HA lub Pokaż custom, aby zobaczyć zapisane wpisy."
+        : live.length ? "Brak punktów w ostatnich 48 godzinach. Wybierz Pokaż starsze, aby zobaczyć wcześniejsze wpisy." : "Brak ręcznych punktów tej osoby.";
       list.append(empty);
     }
     this._previewEdit();
@@ -1150,6 +1175,7 @@ export class ManualLocationAdmin extends HTMLElement {
       edit.textContent = "Edytuj";
       edit.setAttribute("aria-label", `Edytuj punkt ${time.textContent}`);
       edit.addEventListener("click", () => {
+        if (entityId !== this._selected || generation !== this._historySelectionGeneration || !this._placeAllowed()) return;
         this._cancelLocation();
         this._editIndex = index;
         this.shadowRoot.querySelector("#history-current").checked = false;
@@ -1167,7 +1193,7 @@ export class ManualLocationAdmin extends HTMLElement {
       remove.title = "Usuń punkt";
       remove.innerHTML = '<svg viewBox="0 0 24 24" width="20" height="20" aria-hidden="true"><path d="M3 6h18M9 6V3h6v3M5 6l1 15h12l1-15M10 10v7m4-7v7" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"/></svg>';
       remove.setAttribute("aria-label", `Usuń punkt ${time.textContent}`);
-      remove.addEventListener("click", () => this._removePoint(entityId, historyKey(point)));
+      remove.addEventListener("click", () => { if (generation === this._historySelectionGeneration) this._removePoint(entityId, historyKey(point)); });
       if (index >= 0) {
         const setCurrent = document.createElement("button");
         setCurrent.type = "button";
