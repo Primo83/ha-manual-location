@@ -133,6 +133,16 @@ def _payload(point):
     }}
 
 
+def _custom_point_digest(point, person_id):
+    """Fingerprint Own coordinates using the same canonical payload as the HA bridge."""
+    if point is None:
+        return None
+    payload = _point({key: point[key] for key in ("latitude", "longitude")}, person_id)
+    for key in ("latitude", "longitude"):
+        payload[key] = float(payload[key]) or 0.0
+    return hashlib.sha256(json.dumps(payload, sort_keys=True, allow_nan=False).encode("utf-8")).hexdigest()
+
+
 class Gateway:
     def __init__(self, backend_url, public_url, webhook_id, control_token,
                  checkpoint_path, checkpoint_native, verify_native, *,
@@ -217,6 +227,9 @@ class Gateway:
         self.upstream_uncertain = False
         self.uncertainty_origin = None
         self.pending_custom = None
+        self.scheduled_return = self.return_receipt = None
+        self._return_deadline = self._return_clock = None
+        self._return_dirty = False
         self._load_checkpoint()
         self.app = web.Application(client_max_size=self.max_ws_message_bytes if production_mode else max_body_bytes)
         self.app.router.add_route("*", "/{path:.*}", self._handle)
@@ -226,13 +239,30 @@ class Gateway:
     def _load_checkpoint(self):
         try:
             state = _json(self.checkpoint_path.read_bytes())
-            if not isinstance(state, dict) or state.get("person_id") != self.person_id or state.get("version") not in {1, 2}:
+            if not isinstance(state, dict) or state.get("person_id") != self.person_id or state.get("version") not in {1, 2, 3}:
                 raise ValueError("checkpoint identity")
+            if state["version"] == 3:
+                plan = state["scheduled_return"]
+                if (not isinstance(plan, dict) or set(plan) != {"id", "at", "state"}
+                        or not self._return_id(plan["id"]) or plan["state"] not in {"idle", "armed", "due", "applied"}
+                        or (plan["at"] is not None if plan["state"] == "idle" else
+                            type(plan["at"]) is not int or not 0 <= plan["at"] <= 253402300799)):
+                    raise ValueError("scheduled return checkpoint")
+                receipt = state.get("return_receipt")
+                if receipt is not None and (
+                        not isinstance(receipt, dict) or set(receipt) != {"key", "digest", "from_id", "to_id"}
+                        or not self._return_id(receipt["key"]) or not self._return_id(receipt["to_id"])
+                        or (receipt["from_id"] is not None and not self._return_id(receipt["from_id"]))
+                        or not isinstance(receipt["digest"], str) or not re.fullmatch(r"[0-9a-f]{64}", receipt["digest"])
+                        or receipt["to_id"] != plan["id"]):
+                    raise ValueError("scheduled return receipt")
+                self.scheduled_return, self.return_receipt = plan, receipt
+                self._set_return_clock()
             if not isinstance(state.get("upstream_uncertain", False), bool):
                 raise ValueError("checkpoint uncertainty")
             self.upstream_uncertain = state.get("upstream_uncertain", False)
             self.uncertainty_origin = "unknown" if self.upstream_uncertain else None
-            if state["version"] == 2 and self.upstream_uncertain:
+            if state["version"] in {2, 3} and self.upstream_uncertain:
                 origin = state.get("uncertainty_origin")
                 if origin not in {"custom", "phone", "unknown"}:
                     raise ValueError("uncertainty origin")
@@ -267,13 +297,15 @@ class Gateway:
 
     def _save(self, *, last_custom, operation, receipt, pending=_UNCHANGED, upstream_uncertain=None):
         uncertain = self.upstream_uncertain if upstream_uncertain is None else upstream_uncertain
-        state = {"version": 2, "person_id": self.person_id, "mode": "custom",
+        state = {"version": 3 if self.scheduled_return is not None else 2, "person_id": self.person_id, "mode": "custom",
                  "last_custom": last_custom, "operation": operation,
                  "custom_receipt": receipt,
                  "pending_custom": self.pending_custom if pending is _UNCHANGED else pending,
                  "sequence": self.sequence,
                  "upstream_uncertain": uncertain,
                  "uncertainty_origin": self.uncertainty_origin if uncertain else None}
+        if self.scheduled_return is not None:
+            state.update(scheduled_return=self.scheduled_return, return_receipt=self.return_receipt)
         data = json.dumps(state, allow_nan=False, separators=(",", ":")).encode()
         self.checkpoint_path.parent.mkdir(parents=True, exist_ok=True)
         temporary = self.checkpoint_path.with_name(self.checkpoint_path.name + ".tmp")
@@ -291,14 +323,76 @@ class Gateway:
         finally:
             with contextlib.suppress(FileNotFoundError):
                 temporary.unlink()
+        self._return_dirty = False
+
+    @staticmethod
+    def _return_id(value):
+        return isinstance(value, str) and re.fullmatch(r"[A-Za-z0-9_-]{1,128}", value) is not None
+
+    def _set_return_clock(self):
+        self._return_deadline = self._return_clock = None
+        if self.scheduled_return is not None and self.scheduled_return["state"] == "armed":
+            wall, mono = self.wall_clock(), self.clock()
+            if (type(wall) not in {int, float} or type(mono) not in {int, float}
+                    or not math.isfinite(wall) or not math.isfinite(mono) or wall < 0 or mono < 0):
+                raise ValueError("scheduled return clock")
+            self._return_clock = mono
+            self._return_deadline = mono + max(0, self.scheduled_return["at"] - wall)
+
+    def _expire_return(self):
+        """Revoke admission without awaiting the writer or changing its uncertainty."""
+        plan = self.scheduled_return
+        if plan is None or plan["state"] == "idle":
+            return False
+        if plan["state"] == "armed":
+            wall, mono = self.wall_clock(), self.clock()
+            invalid = (type(wall) not in {int, float} or type(mono) not in {int, float}
+                       or not math.isfinite(wall) or not math.isfinite(mono) or wall < 0
+                       or self._return_clock is None or mono < self._return_clock)
+            if not invalid:
+                self._return_clock = mono
+            if invalid or wall >= plan["at"] or mono >= self._return_deadline:
+                self.scheduled_return = {**plan, "id": uuid.uuid4().hex, "state": "due"}
+                self.return_receipt = None
+                self._return_dirty = True
+                self.replay_required = True
+                self._return_deadline = self._return_clock = None
+        if self.scheduled_return["state"] in {"due", "applied"}:
+            self._fail_native()
+            return True
+        return False
+
+    def _save_return(self):
+        self._save(last_custom=self.last_custom, operation=self.last_operation,
+                   receipt=self.last_custom_receipt)
+
+    def _apply_return(self):
+        self._expire_return()
+        if (self.scheduled_return is not None and self.scheduled_return["state"] == "due"
+                and not self.upstream_uncertain and not self.replay_required):
+            if self._return_dirty:
+                self._save_return()
+            self.scheduled_return = {**self.scheduled_return, "state": "applied"}
+            self._return_dirty = True
+            self._save_return()
+
+    async def _recover_tick(self):
+        self._expire_return()
+        if self._return_dirty:
+            async with self.lock:
+                self._save_return()  # Preserve any phone/own marker already owned by the writer.
+        if self._recoverable():
+            await self.recover_pending_custom()
+        elif self.replay_required and not self.upstream_uncertain:
+            await self.replay_last_custom()
 
     async def _startup(self, _app):
         self.session = ClientSession(timeout=ClientTimeout(total=self.upstream_timeout_seconds), trust_env=False,
                                      cookie_jar=DummyCookieJar() if self.production_mode else None)
-        if self._recoverable():
-            await self.recover_pending_custom()
-        elif self.last_custom is not None and not self.upstream_uncertain:
-            await self.replay_last_custom()
+        try:
+            await self._recover_tick()
+        except (OSError, ValueError):
+            self._fail_native()
         self.recovery_task = asyncio.create_task(self._recovery_loop())
 
     async def _cleanup(self, _app):
@@ -315,12 +409,13 @@ class Gateway:
     async def _recovery_loop(self):
         while True:
             await asyncio.sleep(self.recovery_retry_seconds)
-            if self._recoverable():
-                await self.recover_pending_custom()
-            elif self.replay_required and not self.upstream_uncertain:
-                await self.replay_last_custom()
+            try:
+                await self._recover_tick()
+            except (OSError, ValueError):
+                self._fail_native()
 
     def _mode(self):
+        self._expire_return()
         if self.upstream_uncertain:
             return "custom"
         if self.mode == "warmup" and self.normal_after is not None and self.clock() >= self.normal_after:
@@ -364,6 +459,10 @@ class Gateway:
         return valid
 
     def _status(self):
+        verified_own = (isinstance(self.last_custom_receipt, dict)
+                        and self.last_custom_receipt.get("verified") is True
+                        and self.last_custom_receipt.get("origin") == "custom"
+                        and self.last_custom_receipt.get("person_id") == self.person_id)
         return {"mode": self._mode(), "person_id": self.person_id,
                 "remaining_seconds": max(0, self.normal_after - self.clock()) if self._mode() == "warmup" else 0,
                 "last_custom_receipt": self.last_custom_receipt,
@@ -372,7 +471,10 @@ class Gateway:
                 "upstream_uncertain": self.upstream_uncertain,
                 "uncertainty_origin": self.uncertainty_origin,
                 "recovery_phase": self.pending_custom["phase"] if self.pending_custom else None,
-                "recovery_retryable": self._recoverable()}
+                "recovery_retryable": self._recoverable(),
+                "custom_point_digest": _custom_point_digest(self.last_custom, self.person_id) if verified_own else None,
+                "scheduled_return_supported": True,
+                "scheduled_return": dict(self.scheduled_return) if self.scheduled_return is not None else None}
 
     def _receipt(self, origin, *, replay=False, recovery=False):
         self.sequence += 1
@@ -383,9 +485,16 @@ class Gateway:
         return result
 
     def _begin_phone(self):
+        if self._expire_return():
+            return None
         self._begin_native()
-        return {"grant": self.normal_grant, "source_session": self.source_session,
-                "lower": self.wall_clock(), "monotonic": self.clock()}
+        admission = {"grant": self.normal_grant, "source_session": self.source_session,
+                     "lower": self.wall_clock(), "monotonic": self.clock()}
+        if self._expire_return():
+            # This marker is ours and no forward has started. Its clear must be durable.
+            self._commit_native()
+            return None
+        return admission
 
     async def _finish_phone(self, point, admission):
         metadata = None
@@ -456,6 +565,7 @@ class Gateway:
             self._fail_native()
             raise
         self.last_phone_receipt = {**self._receipt("phone"), **(metadata or {})}
+        self._expire_return()
 
     async def _read_json(self, request):
         if request.headers.get("Content-Encoding", "identity") != "identity":
@@ -526,6 +636,12 @@ class Gateway:
     async def _publish_custom(self, point, operation, *, replay=False, recovery=False):
         if not await self._ensure_registration():
             raise RuntimeError("registration changed or unavailable")
+        returning = self.scheduled_return is not None and self.scheduled_return["state"] in {"due", "applied"}
+        if returning and not self.upstream_uncertain and await self.verify_native(dict(point)):
+            # Preserve Recorder state IDs when Own is already native (including pending DELETE).
+            self._begin_native(point=point, operation=operation)
+            await self._phase("location_closed")
+            return await self._finish_custom(point, replay=replay)
         self._begin_native(point=point, operation=operation, recovery=recovery)
         async with self.session.post(self.backend_url + "/api/webhook/" + self.webhook_id,
                                      json=_payload(point), allow_redirects=False,
@@ -562,6 +678,7 @@ class Gateway:
         self.last_custom_receipt, self.replay_required = receipt, False
         self.last_phone_receipt = None
         self.normal_operations.clear()
+        self._apply_return()
 
     async def recover_pending_custom(self):
         async with self.lock:
@@ -614,11 +731,17 @@ class Gateway:
         if request.path in {"/health", "/control/status"} and request.method == "GET":
             await self._ensure_source_session()
             return web.json_response(self._status())
+        if request.path in {"/control/return", "/control/return/ack"} and request.method == "POST":
+            return await self._control_return(request)
         if request.method != "POST" or request.path not in {"/control/custom", "/control/normal"}:
             return web.json_response({"error": "unsupported control"}, status=405)
         body = await self._read_json(request)
-        if not isinstance(body, dict) or set(body) - {"idempotency_key", "point", "source_session"}:
+        if not isinstance(body, dict) or set(body) - {"idempotency_key", "point", "source_session", "expected_id"}:
             raise ValueError("control schema")
+        if "expected_id" in body and body["expected_id"] is not None and not self._return_id(body["expected_id"]):
+            raise ValueError("scheduled return generation")
+        if request.path != "/control/normal" and "expected_id" in body:
+            raise ValueError("custom schema")
         key = body.get("idempotency_key")
         if not isinstance(key, str) or not re.fullmatch(r"[A-Za-z0-9_-]{1,128}", key):
             raise ValueError("idempotency key required")
@@ -642,6 +765,14 @@ class Gateway:
                         return web.json_response({"error": "source session unavailable", **self._status()}, status=503)
                     if key in self.normal_operations and source_session != self.source_session:
                         return web.json_response({"error": "normal session conflict"}, status=409)
+                # Validation above awaits HA; expiry/CAS must be checked again afterwards.
+                self._expire_return()
+                if self._return_dirty:
+                    return web.json_response({"error": "scheduled return persistence pending", **self._status()}, status=503)
+                expected = self.scheduled_return["id"] if self.scheduled_return is not None else None
+                if (body.get("expected_id") != expected or (
+                        self.scheduled_return is not None and self.scheduled_return["state"] in {"due", "applied"})):
+                    return web.json_response({"error": "scheduled return changed", **self._status()}, status=409)
                 if key not in self.normal_operations:
                     self.mode, self.normal_after = "warmup", self.clock() + self.warmup_seconds
                     self.source_session = source_session
@@ -675,6 +806,63 @@ class Gateway:
             receipt = await self._publish_custom(point, operation)
             self._complete_custom(point, operation, receipt)
             return web.json_response({"receipt": receipt, "idempotent": False})
+
+    async def _control_return(self, request):
+        ack = request.path == "/control/return/ack"
+        body = await self._read_json(request)
+        required = {"idempotency_key", "source_session", "expected_id"} | (set() if ack else {"at"})
+        if (not isinstance(body, dict) or set(body) != required or not self._return_id(body["idempotency_key"])
+                or not self._return_id(body["source_session"])
+                or (body["expected_id"] is not None and not self._return_id(body["expected_id"]))
+                or (ack and body["expected_id"] is None)):
+            raise ValueError("scheduled return schema")
+        at = body.get("at")
+        if at is not None and (type(at) is not int or not 0 <= at <= 253402300799):
+            raise ValueError("scheduled return UTC seconds")
+        digest = hashlib.sha256(json.dumps({"ack": ack, "at": at, "expected_id": body["expected_id"]},
+                                           sort_keys=True).encode()).hexdigest()
+        async with self.lock:
+            if self.source_control_check is not None and not await self.source_control_check(body["source_session"]):
+                return web.json_response({"error": "source control session unavailable"}, status=503)
+            self._expire_return()
+            current_id = self.scheduled_return["id"] if self.scheduled_return is not None else None
+            previous = self.return_receipt
+            if previous is not None and previous["key"] == body["idempotency_key"]:
+                if previous["digest"] != digest or previous["to_id"] != current_id:
+                    return web.json_response({"error": "idempotency conflict"}, status=409)
+                if self._return_dirty:
+                    self._save_return()
+                return web.json_response(self._status())
+            if current_id != body["expected_id"]:
+                return web.json_response({"error": "scheduled return changed", **self._status()}, status=409)
+            if (self.upstream_uncertain or self.recovery_active or self._recoverable()
+                    or self.replay_required or self.last_custom is None or not self.last_custom_receipt
+                    or self.last_custom_receipt.get("verified") is not True):
+                return web.json_response({"error": "own recovery pending", **self._status()}, status=503)
+            state = self.scheduled_return["state"] if self.scheduled_return is not None else None
+            if ack:
+                if state != "applied" or self.mode != "custom" or not await self.verify_native(dict(self.last_custom)):
+                    return web.json_response({"error": "scheduled return not applied", **self._status()}, status=409)
+            elif state in {"due", "applied"}:
+                return web.json_response({"error": "scheduled return awaiting acknowledgment", **self._status()}, status=409)
+            elif at is not None:
+                now = self.wall_clock()
+                if type(now) not in {int, float} or not math.isfinite(now) or now < 0:
+                    raise RuntimeError("scheduled return clock unavailable")
+                if at <= now:
+                    raise ValueError("scheduled return must be future UTC")
+            new_id = uuid.uuid4().hex
+            self.scheduled_return = {"id": new_id, "at": at, "state": "armed" if at is not None else "idle"}
+            self.return_receipt = {"key": body["idempotency_key"], "digest": digest,
+                                   "from_id": current_id, "to_id": new_id}
+            self._return_dirty = True
+            try:
+                self._set_return_clock()
+            except ValueError:
+                self._fail_native()
+                raise RuntimeError("scheduled return clock unavailable") from None
+            self._save_return()
+            return web.json_response(self._status())
 
     def _classify(self, body):
         if not isinstance(body, dict) or set(body) - {"type", "data"}:
@@ -826,6 +1014,8 @@ class Gateway:
                         return web.json_response({} if self.production_mode else {"blocked": True, "mode": self._mode()})
                     if kind == "location":
                         admission = self._begin_phone()
+                        if admission is None:
+                            return web.json_response({} if self.production_mode else {"blocked": True, "mode": self._mode()})
                     status, data, headers = await self._http_forward(request, body)
                     if kind == "location":
                         if not 200 <= status < 300 or not await self.verify_native(dict(point)):
@@ -976,6 +1166,11 @@ class Gateway:
                 try:
                     if category == "location":
                         admission = self._begin_phone()
+                        if admission is None:
+                            await downstream.send_json({"id": identifier, "type": "result", "success": True,
+                                "result": {"status": 200, "body": '{}' if self.production_mode else '{"blocked":true}',
+                                           "headers": {"Content-Type": "application/json"}}})
+                            return
                     await upstream.send_json({**command, "body": json.dumps(body)})
                     response = await asyncio.wait_for(future, self.upstream_timeout_seconds)
                     if category == "location":
