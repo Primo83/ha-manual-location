@@ -45,6 +45,7 @@ class GatewayBridge:
         self.ready = False
         self.pending = False
         self.return_supported = False
+        self.handoff_supported = False
 
     def invalidate(self):
         """A delayed normal grant must not survive a later close or failure."""
@@ -139,6 +140,14 @@ class GatewayBridge:
         if digest is not None and (not isinstance(digest, str) or not re.fullmatch(r"[0-9a-f]{64}", digest)):
             raise GatewayError("invalid custom point digest")
         self.return_supported = self.return_supported or supported
+        handoff_supported = result.get("handoff_supported", False)
+        handoff = result.get("handoff")
+        if type(handoff_supported) is not bool or (handoff is not None and (
+                not handoff_supported or not isinstance(handoff, dict) or set(handoff) != {"id", "state"}
+                or not isinstance(handoff["id"], str) or not re.fullmatch(r"[A-Za-z0-9_-]{1,128}", handoff["id"])
+                or handoff["state"] not in {"idle", "prepared", "applied"})):
+            raise GatewayError("invalid handoff status")
+        self.handoff_supported = self.handoff_supported or handoff_supported
         blocked = self.pending or result.get("upstream_uncertain") or result.get("replay_required") or result.get("recovery_retryable")
         return {"enabled": True, "available": True, "person_id": self.person_id,
                 "mode": "blocked" if blocked else result["mode"],
@@ -150,7 +159,51 @@ class GatewayBridge:
                 "has_custom_point": custom is not None,
                 "last_custom_receipt": custom, "last_phone_receipt": phone,
                 "scheduled_return_supported": supported, "scheduled_return": plan,
-                "custom_point_digest": digest}
+                "custom_point_digest": digest,
+                "handoff_supported": handoff_supported, "handoff": handoff}
+
+    async def handoff(self, key, expected_id):
+        self.invalidate()
+        result = await self._request("/control/handoff", {
+            "idempotency_key": key, "source_session": self.session, "expected_id": expected_id})
+        status = self._status(result)
+        if not status["handoff"] or status["handoff"]["state"] == "idle":
+            if (status["mode"] != "custom" or not status["gps_blocked"]
+                    or status["replay_required"] or status["recovery_retryable"]):
+                raise GatewayError("handoff unavailable")
+            # No phone was admitted after the last explicit Own. The gate has
+            # proved a clean close; the existing Store timestamp stays intact.
+            self.ready, self.pending = True, False
+            return None
+        return await self.read_handoff()
+
+    async def read_handoff(self):
+        result = await self._request("/control/handoff")
+        handoff = result.get("handoff")
+        if handoff is None or handoff.get("state") == "idle":
+            return handoff
+        from .coordinator import coordinates, timestamp
+
+        try:
+            if (not isinstance(handoff, dict) or handoff.get("state") not in {"prepared", "applied"}
+                    or not isinstance(handoff.get("id"), str) or not re.fullmatch(r"[A-Za-z0-9_-]{1,128}", handoff["id"])
+                    or handoff.get("point", {}).get("person_id") != self.person_id
+                    or handoff["point"].get("gps_accuracy") != 0):
+                raise ValueError
+            current = coordinates({key: handoff["point"][key] for key in ("latitude", "longitude")})
+            current["timestamp"] = timestamp(handoff["native_timestamp"]).isoformat()
+            return {**handoff, "current": current}
+        except Exception:
+            raise GatewayError("invalid handoff point") from None
+
+    async def acknowledge_handoff(self, key, expected_id):
+        result = await self._request("/control/handoff/ack", {
+            "idempotency_key": key, "source_session": self.session, "expected_id": expected_id})
+        status = self._status(result)
+        if not status["handoff"] or status["handoff"]["state"] != "idle" or status["handoff"]["id"] == expected_id:
+            raise GatewayError("handoff acknowledgment unconfirmed")
+        self.ready, self.pending = True, False
+        return status
 
     async def status(self):
         return self._status(await self._request("/control/status"))

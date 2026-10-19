@@ -106,7 +106,8 @@ class LocationHistory:
         if not await self.async_ready():
             raise GatewayError("history unavailable")
         self.grants[key] = {"session": self.coordinator.gateway.session,
-                            "closing_at": None, "deadline": None}
+                            "closing_at": None, "deadline": None,
+                            "generation": await self.db.async_generation() if self.db is not None else 0}
         self.active_grant = key
 
     def _grant_valid(self, payload):
@@ -134,8 +135,11 @@ class LocationHistory:
 
     async def async_receive(self, payload):
         required = {"operation_id", "grant", "source_session", "point", "snapshots", "lower", "upper", "elapsed"}
-        if not isinstance(payload, dict) or set(payload) != required:
+        if not isinstance(payload, dict) or set(payload) not in (required, required | {"core_boot"}):
             raise LocationError("invalid_input")
+        core_boot = payload.get("core_boot")
+        if core_boot is not None and core_boot != self.hass.data.get("manual_location_core_boot"):
+            raise LocationError("history_unavailable")
         for key in ("operation_id", "grant", "source_session"):
             if not isinstance(payload[key], str) or not 1 <= len(payload[key]) <= 128:
                 raise LocationError("invalid_input")
@@ -170,10 +174,51 @@ class LocationHistory:
         person = states[self.coordinator.gateway.person_id]
         accepted = {key: person[key] for key in ("latitude", "longitude")}
         accepted["timestamp"] = person["last_updated"]
-        result = await db.async_record(payload["operation_id"], payload["grant"], accepted, states)
+        admission = None if core_boot is None else {
+            "request_digest": _snapshot_hash(payload), "source_session": payload["source_session"], "core_boot": core_boot}
+        # A late admitted callback may complete history, but cannot displace a
+        # later explicit Own intent. Closed grants retain their admission only
+        # while no own-current fence has consumed them.
+        result = await db.async_record(payload["operation_id"], payload["grant"], accepted, states,
+                                       admission=admission, promote=self.grants[payload["grant"]]["generation"])
         # ACK preserves the exact REST representation bound by the producer.
         return {"history_id": result["history_id"],
                 "native_timestamp": payload["snapshots"][self.coordinator.gateway.person_id]["last_updated"]}
+
+    async def async_query(self, binding):
+        required = {"operation_id", "grant", "source_session", "core_boot", "request_digest"}
+        if (not isinstance(binding, dict) or set(binding) != required
+                or any(not isinstance(value, str) or not 1 <= len(value) <= 128 for value in binding.values())):
+            raise LocationError("invalid_input")
+        db = await self.async_prepare()
+        record = await db.async_operation(binding)
+        return {"found": False} if record is None else {"found": True, **record}
+
+    async def async_current(self):
+        """Use acceptance order, never raw native state or Native timestamps."""
+        person = self.coordinator.data["persons"].get(self.coordinator.gateway.person_id)
+        if person and person["enabled"]:
+            return deepcopy(person["current"])
+        if self.db is not None and self.db.available:
+            record = await self.db.async_operation()
+            if record is not None:
+                return deepcopy(record["point"])
+        return deepcopy(person.get("current")) if person else None
+
+    async def async_own_current(self):
+        self.close_confirmed()
+        if self.db is not None:
+            await self.db.async_own_current()
+
+    async def async_preserve_handoff(self, handoff_id, point):
+        """Keep a timestamp tie as a verified HA publication, without changing 1.x history IDs."""
+        db = await self.async_prepare()
+        states = self._snapshots()
+        if any(state["gps_accuracy"] != 0 or any(
+                not _number(state[key]) or abs(state[key] - point[key]) >= 1e-8
+                for key in ("latitude", "longitude")) for state in states.values()):
+            raise LocationError("history_unavailable")
+        await db.async_record("own_handoff_" + handoff_id, "own_handoff", point, states, own_replay=True)
 
     async def async_view(self, response, entity_ids, start, end):
         coordinator, bridge = self.coordinator, self.coordinator.gateway
@@ -186,7 +231,7 @@ class LocationHistory:
             raise LocationError("history_unavailable")
         own = person["current"]
         points = list(person["history"])
-        current = own
+        current = await self.async_current()
         db_revision = None
         if self.db is not None and self.db.available:
             db_revision = self.db.revision
@@ -194,7 +239,7 @@ class LocationHistory:
             try:
                 status = await bridge.status()
                 receipt = status["last_phone_receipt"]
-                if (status["mode"] == "normal" and not bridge.pending and bridge.ready
+                if (current == own and status["mode"] == "normal" and not bridge.pending and bridge.ready
                         and receipt and receipt.get("grant") == self.active_grant and receipt.get("history_id")):
                     record = await self.db.async_get(receipt["history_id"])
                     if record and record["grant"] == self.active_grant:
@@ -205,11 +250,14 @@ class LocationHistory:
                 pass  # Safe own point remains available during gate downtime.
         points.append(own)
         start_at, end_at = timestamp(start), timestamp(end)
-        by_time = {timestamp(point["timestamp"]): point for point in points}
-        history = [point for instant, point in sorted(by_time.items()) if start_at <= instant <= end_at]
-        preceding = [instant for instant in by_time if instant < start_at]
+        # Equal timestamps can belong to different events/sources. Coalesce only
+        # the exact same display point (e.g. the frozen phone becomes Own).
+        unique = {(_snapshot_hash(point)): point for point in points}
+        ordered = sorted(unique.values(), key=lambda point: (timestamp(point["timestamp"]), _snapshot_hash(point)))
+        history = [point for point in ordered if start_at <= timestamp(point["timestamp"]) <= end_at]
+        preceding = [point for point in ordered if timestamp(point["timestamp"]) < start_at]
         if preceding:
-            history.insert(0, by_time[max(preceding)])
+            history.insert(0, preceding[-1])
         if (revision != coordinator.data["revision"] or session != bridge.session
                 or (db_revision is not None and db_revision != self.db.revision)):
             raise LocationError("history_changed")

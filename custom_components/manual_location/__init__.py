@@ -2,6 +2,7 @@
 
 from pathlib import Path
 import hmac
+import secrets
 
 from aiohttp import web
 
@@ -62,7 +63,8 @@ class GatewaySessionView(HomeAssistantView):
             raise web.HTTPServiceUnavailable()
         if request.query.get("control") != "1" and not await coordinator.location_history.async_ready():
             raise web.HTTPServiceUnavailable()
-        return web.json_response({"session": bridge.session})
+        return web.json_response({"session": bridge.session,
+                                  "core_boot": request.app[KEY_HASS].data.setdefault(f"{DOMAIN}_core_boot", secrets.token_urlsafe(32))})
 
 
 class GatewayHistoryView(HomeAssistantView):
@@ -75,8 +77,7 @@ class GatewayHistoryView(HomeAssistantView):
     async def post(self, request):
         coordinator = request.app[KEY_HASS].data.get(DOMAIN)
         bridge = coordinator.gateway if coordinator is not None else None
-        if (not request["hass_user"].is_admin or bridge is None or not coordinator.loaded
-                or not hmac.compare_digest(request.headers.get("X-Manual-Location-Key", ""), bridge._token)):
+        if not request["hass_user"].is_admin or bridge is None or not coordinator.loaded:
             raise web.HTTPForbidden()
         raw = bytearray()
         async for chunk in request.content.iter_chunked(4096):
@@ -86,14 +87,57 @@ class GatewayHistoryView(HomeAssistantView):
         try:
             import json
 
-            result = await coordinator.location_history.async_receive(json.loads(raw))
+            payload = json.loads(raw)
         except Exception:
-            # Neither an exception payload nor a request contains loggable data.
+            return web.json_response({"error": "history unavailable"}, status=409)
+        supplied = payload.pop("gateway_key", "") if isinstance(payload, dict) else ""
+        # Supervisor deliberately strips custom request headers. Keep the extra
+        # private credential in the POST body, in addition to native HA auth.
+        supplied = supplied or request.headers.get("X-Manual-Location-Key", "")
+        if (not isinstance(supplied, str) or len(supplied) > 512 or not supplied.isascii()
+                or not hmac.compare_digest(supplied, bridge._token)):
+            raise web.HTTPForbidden()
+        try:
+            result = await coordinator.location_history.async_receive(payload)
+        except Exception:
+            # Never log callback data, credentials or exception payloads.
+            return web.json_response({"error": "history unavailable"}, status=409)
+        return web.json_response(result)
+
+
+class GatewayHistoryQueryView(GatewayHistoryView):
+    """Read only an exactly bound already accepted operation after a lost ACK."""
+
+    url = "/api/manual_location/gateway_history/query"
+    name = f"{DOMAIN}:gateway_history_query"
+
+    async def post(self, request):
+        coordinator = request.app[KEY_HASS].data.get(DOMAIN)
+        bridge = coordinator.gateway if coordinator is not None else None
+        if not request["hass_user"].is_admin or bridge is None or not coordinator.loaded:
+            raise web.HTTPForbidden()
+        raw = bytearray()
+        async for chunk in request.content.iter_chunked(4096):
+            raw.extend(chunk)
+            if len(raw) > 16384:
+                raise web.HTTPRequestEntityTooLarge(max_size=16384, actual_size=len(raw))
+        try:
+            import json
+            payload = json.loads(raw)
+        except Exception:
+            return web.json_response({"error": "history unavailable"}, status=409)
+        key = payload.pop("gateway_key", "") if isinstance(payload, dict) else ""
+        if not isinstance(key, str) or len(key) > 512 or not key.isascii() or not hmac.compare_digest(key, bridge._token):
+            raise web.HTTPForbidden()
+        try:
+            result = await coordinator.location_history.async_query(payload)
+        except Exception:
             return web.json_response({"error": "history unavailable"}, status=409)
         return web.json_response(result)
 
 
 async def async_setup(hass, config):
+    hass.data.setdefault(f"{DOMAIN}_core_boot", secrets.token_urlsafe(32))
     async_register_commands(hass)
     return True
 
@@ -121,6 +165,7 @@ async def async_setup_entry(hass, entry):
         hass.http.register_view(FrontendView)
         hass.http.register_view(GatewaySessionView)
         hass.http.register_view(GatewayHistoryView)
+        hass.http.register_view(GatewayHistoryQueryView)
         hass.data[f"{DOMAIN}_static_registered"] = True
     await async_register_panel(
         hass, frontend_url_path=PANEL_PATH, webcomponent_name="manual-location-admin",

@@ -154,6 +154,10 @@ class GpsHistory:
                 CREATE TABLE IF NOT EXISTS operations (
                     id TEXT PRIMARY KEY, digest TEXT NOT NULL, history_id TEXT NOT NULL,
                     deleted INTEGER NOT NULL DEFAULT 0);
+                CREATE TABLE IF NOT EXISTS admissions (
+                    seq INTEGER PRIMARY KEY AUTOINCREMENT, operation_id TEXT NOT NULL UNIQUE,
+                    request_digest TEXT NOT NULL, grant_id TEXT NOT NULL,
+                    source_session TEXT NOT NULL, core_boot TEXT NOT NULL);
                 CREATE TABLE IF NOT EXISTS refs (
                     history_id TEXT NOT NULL REFERENCES points(id) ON DELETE CASCADE,
                     entity_id TEXT NOT NULL, timestamp REAL NOT NULL, context_id TEXT NOT NULL,
@@ -170,6 +174,7 @@ class GpsHistory:
                 raise GpsHistoryError("history_assignment_changed")
             db.execute("INSERT OR IGNORE INTO meta VALUES ('identity',?)", (identity,))
             db.execute("INSERT OR IGNORE INTO meta VALUES ('revision','0')")
+            db.execute("INSERT OR IGNORE INTO meta VALUES ('current_generation','0')")
             db.execute("PRAGMA user_version=1")
             return self._revision(db), self._pending(db) is not None
 
@@ -220,8 +225,8 @@ class GpsHistory:
                 "grant": row["grant_id"], "operation_id": row["operation_id"],
                 "snapshots": json.loads(row["snapshots"])}
 
-    def _capture(self, operation_id, grant, point, snapshots):
-        digest = _digest([grant, point, snapshots])
+    def _capture(self, operation_id, grant, point, snapshots, admission=None, promote=True, own_replay=False):
+        digest = _digest([grant, point] if own_replay else [grant, point, snapshots])
         event_key = _digest(self._event_refs(snapshots))
         with self._database() as db:
             if self._pending(db):
@@ -232,6 +237,11 @@ class GpsHistory:
                     raise GpsHistoryError("history_operation_retired")
                 if old["digest"] != digest:
                     raise GpsHistoryError("history_operation_conflict")
+                if admission is not None:
+                    bound = db.execute("SELECT * FROM admissions WHERE operation_id=?", (operation_id,)).fetchone()
+                    if bound is None or any(bound[key] != admission[key] for key in
+                                           ("request_digest", "source_session", "core_boot")):
+                        raise GpsHistoryError("history_operation_conflict")
                 return old["history_id"], self._revision(db)
             existing = db.execute("SELECT * FROM points WHERE event_key=?", (event_key,)).fetchone()
             if existing:
@@ -248,9 +258,15 @@ class GpsHistory:
                     for ref in self._event_refs(snapshots)])
             db.execute("INSERT INTO operations(id,digest,history_id) VALUES (?,?,?)",
                        (operation_id, digest, history_id))
+            if admission is not None:
+                db.execute("INSERT INTO admissions(operation_id,request_digest,grant_id,source_session,core_boot) VALUES (?,?,?,?,?)",
+                           (operation_id, admission["request_digest"], grant, admission["source_session"], admission["core_boot"]))
+                generation = int(db.execute("SELECT value FROM meta WHERE key='current_generation'").fetchone()[0])
+                if promote is True or (type(promote) is int and promote == generation):
+                    db.execute("INSERT OR REPLACE INTO meta VALUES ('current_operation',?)", (operation_id,))
             return history_id, self._advance(db)
 
-    async def async_record(self, operation_id, grant, point, snapshots):
+    async def async_record(self, operation_id, grant, point, snapshots, *, admission=None, promote=True, own_replay=False):
         if (not isinstance(operation_id, str) or not 1 <= len(operation_id) <= 256
                 or not isinstance(grant, str) or not 1 <= len(grant) <= 256
                 or not isinstance(point, dict) or set(point) != {"latitude", "longitude", "timestamp"}
@@ -258,10 +274,17 @@ class GpsHistory:
             raise GpsHistoryError("history_invalid_input")
         _instant(point["timestamp"])
         snapshots = self._snapshots(snapshots)
+        if own_replay and (grant != "own_handoff" or admission is not None
+                           or any(snapshot.get("gps_accuracy") != 0 for snapshot in snapshots.values())):
+            raise GpsHistoryError("history_invalid_input")
+        if admission is not None and (not isinstance(admission, dict)
+                or set(admission) != {"request_digest", "source_session", "core_boot"}
+                or any(not isinstance(value, str) or not 1 <= len(value) <= 128 for value in admission.values())):
+            raise GpsHistoryError("history_invalid_input")
         async with self._lock:
             self._require(mutation=True)
             try:
-                history_id, self.revision = await self._io(self._capture, operation_id, grant, point, snapshots)
+                history_id, self.revision = await self._io(self._capture, operation_id, grant, point, snapshots, admission, promote, own_replay)
             except asyncio.CancelledError:
                 # The executor's durable commit finished before _io re-raised.
                 marker, self.revision = await self._io(self._read_state)
@@ -280,6 +303,60 @@ class GpsHistory:
         async with self._lock:
             self._require()
             return await self._io(self._get, history_id)
+
+    def _operation(self, binding=None):
+        with self._database() as db:
+            if binding is None:
+                marker = db.execute("SELECT value FROM meta WHERE key='current_operation'").fetchone()
+                if not marker or not marker[0]:
+                    return None
+                operation_id = marker[0]
+            else:
+                operation_id = binding["operation_id"]
+            row = db.execute("SELECT a.*,o.history_id,o.deleted FROM admissions a JOIN operations o ON o.id=a.operation_id WHERE a.operation_id=?",
+                             (operation_id,)).fetchone()
+            if row is None or row["deleted"]:
+                return None
+            if binding is not None and any(row[column] != binding[key] for key, column in (
+                    ("request_digest", "request_digest"), ("grant", "grant_id"),
+                    ("source_session", "source_session"), ("core_boot", "core_boot"))):
+                raise GpsHistoryError("history_operation_conflict")
+            if row["history_id"] in (self._pending(db) or {}).get("gps_ids", []):
+                return None
+            point = db.execute("SELECT * FROM points WHERE id=?", (row["history_id"],)).fetchone()
+            if point is None:
+                return None
+            record = self._record(point)
+            return {"history_id": row["history_id"], "native_timestamp": record["point"]["timestamp"],
+                    "point": record["point"], "snapshots": record["snapshots"],
+                    "operation_id": operation_id, "grant": row["grant_id"],
+                    "source_session": row["source_session"], "core_boot": row["core_boot"],
+                    "request_digest": row["request_digest"], "accepted_seq": row["seq"]}
+
+    async def async_operation(self, binding=None):
+        async with self._lock:
+            self._require()
+            return await self._io(self._operation, binding)
+
+    def _own_current(self):
+        with self._database() as db:
+            db.execute("INSERT OR REPLACE INTO meta VALUES ('current_operation','')")
+            db.execute("UPDATE meta SET value=CAST(value AS INTEGER)+1 WHERE key='current_generation'")
+            return self._advance(db)
+
+    async def async_own_current(self):
+        async with self._lock:
+            self._require(mutation=True)
+            self.revision = await self._io(self._own_current)
+
+    def _generation(self):
+        with self._database() as db:
+            return int(db.execute("SELECT value FROM meta WHERE key='current_generation'").fetchone()[0])
+
+    async def async_generation(self):
+        async with self._lock:
+            self._require()
+            return await self._io(self._generation)
 
     @staticmethod
     def _range(start, end):

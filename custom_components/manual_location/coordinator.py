@@ -381,6 +381,14 @@ class ManualLocation:
 
     async def _async_gateway_sync(self):
         """The Store is the latest own target; never enqueue older positions."""
+        if self.gateway.handoff_supported or not self.gateway.ready:
+            try:
+                status = await self.gateway.status()
+                if status.get("handoff_supported"):
+                    await self._async_gateway_handoff_reconcile(status)
+            except GatewayError:
+                self._gateway_failed()
+                return
         current = self._gateway_current(self.data)
         if self.gateway.ready and not self.gateway.pending and self._gateway_applied == current:
             return
@@ -422,10 +430,20 @@ class ManualLocation:
 
     async def _async_gateway_return_reconcile(self, status):
         """Called with _save_lock; persist Own before consuming the Gate latch."""
+        status = await self._async_gateway_handoff_reconcile(status)
         plan = status.get("scheduled_return")
         if plan is None or plan["state"] not in {"due", "applied"}:
             return status
         self.location_history.close_started(cutoff=plan["at"])
+        if status.get("handoff_supported"):
+            # Expiry may be observed before the Gate's recovery task has
+            # frozen its last admitted report. Drain/freeze before constructing
+            # any snapshot from the previous Own current.
+            latch = status.get("handoff")
+            if latch is None or latch["state"] == "idle":
+                await self.gateway.handoff(self.gateway.key(self.data["revision"], "return-handoff", plan["id"]),
+                                           latch["id"] if latch else None)
+                status = await self._async_gateway_handoff_reconcile(await self.gateway.status())
         # Exact-delete recovery owns the current Store hash until its journal
         # is cleaned. Never starve that recovery with a new source write.
         await self.location_history.async_recover()
@@ -459,8 +477,56 @@ class ManualLocation:
         self._schedule_gateway_retry()
         return current_status
 
+    async def _async_gateway_handoff_reconcile(self, status):
+        """Commit one frozen target before ACK; called only with _save_lock."""
+        handoff = status.get("handoff")
+        if not handoff or handoff["state"] == "idle":
+            return status
+        # Gate-initiated deadline/recovery handoffs also revoke an old Normal
+        # consent. Its delayed request must not reopen GPS after our ACK.
+        self.gateway.invalidate()
+        self.location_history.close_started()
+        await self.location_history.async_recover()
+        result = await self.gateway.read_handoff()
+        if result is None or result.get("id") != handoff["id"] or result.get("state") != "applied":
+            raise GatewayError("handoff recovery pending")
+        current = result["current"]
+        person = self.data["persons"].get(self.gateway.person_id)
+        if not person:
+            raise GatewayError("handoff person unavailable")
+        if person["current"] != current or not person["enabled"]:
+            snapshot = self._snapshot()
+            target = snapshot["persons"][self.gateway.person_id]
+            target.update(current=deepcopy(current), enabled=True)
+            if not any(timestamp(point["timestamp"]) == timestamp(current["timestamp"]) for point in target["history"]):
+                if len(target["history"]) >= MAX_HISTORY:
+                    raise LocationError("history_too_large")
+                target["history"].append(deepcopy(current))
+                target["history"].sort(key=lambda point: timestamp(point["timestamp"]))
+            snapshot["revision"] += 1
+            await self.store.async_save(snapshot)
+            if await self.store.async_load() != snapshot:
+                raise LocationError("storage_error")
+            self._require_loaded()
+            self.data = snapshot
+            self._reschedule()
+        if any(timestamp(point["timestamp"]) == timestamp(current["timestamp"])
+               and coordinates(point) != coordinates(current)
+               for point in self.data["persons"][self.gateway.person_id]["history"]):
+            # Own history keeps its existing timestamp-based edit/delete IDs.
+            # Preserve a different tied point in the already supported HA axis,
+            # bound to the actual verified Own publication and its native refs.
+            await self.location_history.async_preserve_handoff(handoff["id"], current)
+        # The Store write is complete before invalidating the old operation
+        # pointer. Repeating after a crash only strengthens the Own fence.
+        await self.location_history.async_own_current()
+        status = await self.gateway.acknowledge_handoff(
+            self.gateway.key(self.data["revision"], "handoff-ack", handoff["id"]), handoff["id"])
+        self._gateway_applied = deepcopy(current) if self.data["enabled"] else None
+        return status
+
     async def _async_gateway_return_preflight(self):
-        if self.gateway is None or not self.gateway.return_supported:
+        if self.gateway is None:
             return None
         try:
             status = await self.gateway.status()
@@ -540,6 +606,7 @@ class ManualLocation:
             return {"enabled": False}
         try:
             result = await self.gateway.status()
+            result["current"] = await self.location_history.async_current()
             self.require_session(connection, token)
             return result
         except GatewayError:
@@ -908,6 +975,21 @@ class ManualLocation:
             if (scenario := snapshot["scenarios"].get(scenario_id)) and scenario["status"] == "running":
                 scenario.update(status="stopped", reason="storage_error")
         validate_running_intervals(snapshot["scenarios"])
+        if (self.gateway is not None and self.gateway.handoff_supported
+                and self._gateway_current(snapshot) is not None
+                and not self.data["persons"].get(self.gateway.person_id, {}).get("enabled", True)):
+            status = await self.gateway.status()
+            latch = status.get("handoff")
+            await self.gateway.handoff(self.gateway.key(snapshot["revision"], "own-baseline"), latch["id"] if latch else None)
+            await self._async_gateway_handoff_reconcile(await self.gateway.status())
+            snapshot["revision"] = self.data["revision"] + 1
+            baseline = self.data["persons"][self.gateway.person_id]["current"]
+            history = snapshot["persons"][self.gateway.person_id]["history"]
+            if not any(timestamp(point["timestamp"]) == timestamp(baseline["timestamp"]) for point in history):
+                if len(history) >= MAX_HISTORY:
+                    raise LocationError("history_too_large")
+                history.append(deepcopy(baseline))
+                history.sort(key=lambda point: timestamp(point["timestamp"]))
         gateway_changed = self.gateway is not None and self._gateway_current(snapshot) != self._gateway_current(self.data)
         gateway_close = self.gateway is not None and (
             (self.data["enabled"] and not snapshot["enabled"])
@@ -916,11 +998,18 @@ class ManualLocation:
         if self.gateway is not None and (gateway_changed or gateway_close or gateway_normal):
             # Invalidate the old normal epoch before touching persistent data.
             await self._async_gateway_close(snapshot["revision"])
+        if (gateway_normal and self.data["persons"].get(self.gateway.person_id, {}).get("enabled")):
+            # A previously committed explicit Own remains authoritative across
+            # a failed index fence. Clear its old phone pointer before opening
+            # a new period, while repeated Normal retains its accepted baseline.
+            await self.location_history.async_own_current()
         await self.store.async_save(snapshot)
         if await self.store.async_load() != snapshot:
             raise LocationError("storage_error")
         self._require_loaded()
         self.data = snapshot
+        if (self.gateway is not None and gateway_changed and self._gateway_current(snapshot) is not None):
+            await self.location_history.async_own_current()
         self._retry_at = None
         self._storage_attempts = 0
         self._suspended.clear()
@@ -934,11 +1023,20 @@ class ManualLocation:
             self.require_session(connection, token)
             return_status = await self._async_gateway_return_preflight()
             self.require_session(connection, token)
+            if self.gateway is not None and self.gateway.handoff_supported and return_status is None:
+                raise LocationError("gateway_return_unconfirmed")
             normal_generation = {"expected_id": return_status["scheduled_return"]["id"]
                 if return_status["scheduled_return"] else None} if return_status is not None else {}
             if type(enabled) is not bool:
                 raise LocationError("invalid_input")
             self._require_revision(revision)
+            explicit_own = False
+            if self.gateway is not None:
+                raw = persons.get(self.gateway.person_id) if isinstance(persons, dict) else None
+                previous = self.data["persons"].get(self.gateway.person_id)
+                if isinstance(raw, dict) and previous is not None:
+                    explicit_own = ("current_history_timestamp" in raw or raw.get("record_current_now") is True
+                                    or coordinates(raw.get("current")) != coordinates(previous["current"]))
             snapshot = {
                 "revision": revision + 1, "enabled": enabled,
                 "persons": validate_persons(self.hass, persons, self.data["persons"], datetime.now(UTC)),
@@ -946,6 +1044,22 @@ class ManualLocation:
                 "quick_save": deepcopy(self.data["quick_save"]) if quick_save is _UNSET else validate_quick_save(self.hass, quick_save),
                 "activity": deepcopy(self.data["activity"]) if activity is _UNSET else validate_activity(self.hass, activity, self.data["activity"]),
             }
+            if (self.gateway is not None and return_status is not None and return_status.get("handoff_supported")
+                    and enabled and self.gateway.person_id in snapshot["persons"]
+                    and snapshot["persons"][self.gateway.person_id]["enabled"]
+                    and not self.data["persons"].get(self.gateway.person_id, {}).get("enabled", True)):
+                await self._async_gateway_target_guard(snapshot)
+                latch = return_status.get("handoff")
+                await self.gateway.handoff(self.gateway.key(revision, "handoff"), latch["id"] if latch else None)
+                await self._async_gateway_handoff_reconcile(await self.gateway.status())
+                frozen = self.data["persons"][self.gateway.person_id]["current"]
+                if not explicit_own:
+                    snapshot["persons"][self.gateway.person_id]["current"] = deepcopy(frozen)
+                history = snapshot["persons"][self.gateway.person_id]["history"]
+                if not any(timestamp(item["timestamp"]) == timestamp(frozen["timestamp"]) for item in history):
+                    history.append(deepcopy(frozen))
+                    history.sort(key=lambda item: timestamp(item["timestamp"]))
+                snapshot["revision"] = self.data["revision"] + 1
             if gateway_mode is not _UNSET:
                 if (gateway_mode != "normal" or self.gateway is None or not enabled
                         or self._gateway_current(snapshot) is not None
@@ -959,6 +1073,8 @@ class ManualLocation:
                     elif snapshot["persons"].get(entity_id) != self.data["persons"].get(entity_id):
                         scenario.update(status="stopped", reason="manual_change")
             await self._commit(snapshot, gateway_normal=gateway_mode == "normal")
+            if explicit_own and self.gateway is not None and self._gateway_current(snapshot) is not None:
+                await self.location_history.async_own_current()
             if gateway_mode == "normal" and self.gateway.ready and not self.gateway.pending:
                 try:
                     key = self.gateway.key(snapshot["revision"], "normal")

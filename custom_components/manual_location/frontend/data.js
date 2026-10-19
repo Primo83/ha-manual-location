@@ -152,7 +152,7 @@ export function errorText(error) {
     invalid_return_time: "Wybierz przyszłą datę i godzinę w strefie Home Assistant. Godzina pominięta lub powtórzona przy zmianie czasu jest niejednoznaczna; wybierz inną.",
     return_changed: "Termin zmienił się podczas edycji. Wczytaj zapisane dane i ustaw go ponownie.",
     gateway_return_unavailable: "Termin wymaga bramki z obsługą automatycznego powrotu. Sprawdź jej wersję i połączenie.",
-    gateway_return_unconfirmed: "Nie potwierdzono zapisu terminu. Sprawdź zapisany stan; nie zakładaj, że termin został ustawiony lub anulowany.",
+    gateway_return_unconfirmed: "Nie potwierdzono zakończenia przełączenia lub zapisu terminu. Sprawdź stan przed ponowną próbą; szkic pozostał w formularzu.",
     gateway_return_recovering: "Trwa powrót do custom. Poczekaj na potwierdzenie własnej pozycji przed zmianą terminu.",
     gateway_return_requires_custom: "Najpierw zapisz własną pozycję i potwierdź ją w trybie custom. Termin korzysta z zapisanej pozycji.",
     return_own_unconfirmed: "Własny punkt nie jest potwierdzony. Wybierz „Ręczna (custom)” i „Zapisz wszystkie zmiany”, aby go potwierdzić, a następnie zapisz termin.",
