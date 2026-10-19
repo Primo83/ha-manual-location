@@ -1,0 +1,3 @@
+#!/command/with-contenv bash
+set -eu
+exec nginx -e /dev/null -c /tmp/manual-location-gateway/nginx.conf -g 'daemon off;'

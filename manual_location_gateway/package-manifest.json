@@ -1,0 +1,33 @@
+{
+  "files": {
+    "README.md": "8dbedaee46e59ef01eb1c4237ba7e02846a51f76c763e357d6c1708d3f0eac00",
+    "manual_location_gateway/Dockerfile": "cdcfa21aee3b6ab378819e34d9c58e5a8111f4a02595a16e5c70c5c50878c9ea",
+    "manual_location_gateway/README.md": "db7dced3ebf913c9fbae7c63d6bd417ff2f7a94998453a5470da0019756e9c87",
+    "manual_location_gateway/config.yaml": "710a13a8cb224a58a1438b0978aa0c64015d127f427b17ebfb4cd3d03a79838f",
+    "manual_location_gateway/gateway/__init__.py": "e1937f51d2f256b8d4d19e2601bb1a52543adb244393ead475bf0b4e3b164272",
+    "manual_location_gateway/gateway/home_assistant.py": "df8712d5b7e6c9002f4ba3131dd90536a1ce5024ad34a639ddae353e28e60ff0",
+    "manual_location_gateway/gateway/production.py": "69a64858ff4d370969b66ddfdfe460934327835d31d3b7357a02c63476481691",
+    "manual_location_gateway/gateway/server.py": "843676478d581344501a93d5fc026dfae773e006c0e8aca99db8fcb2cdcb85e9",
+    "manual_location_gateway/requirements.lock": "3313e6151ef008e5f491dae3b0daa38ba5396f2e24ed921b2779fc0375efe954",
+    "manual_location_gateway/rootfs/etc/s6-overlay/s6-rc.d/gateway/dependencies.d/init-manual-location": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+    "manual_location_gateway/rootfs/etc/s6-overlay/s6-rc.d/gateway/finish": "b497ec2d540fdca1ee797e2565de502c8fefdab983dd9b95b64339741457cdb3",
+    "manual_location_gateway/rootfs/etc/s6-overlay/s6-rc.d/gateway/run": "9c6c0076f8460933e082cc2ff71d8c812d80f6a3d31ba328548dbdfc88abd805",
+    "manual_location_gateway/rootfs/etc/s6-overlay/s6-rc.d/gateway/type": "d0001a150b83f68f09004c5059045cb76a3f064eed4d42ce072bc3722c118006",
+    "manual_location_gateway/rootfs/etc/s6-overlay/s6-rc.d/init-manual-location/dependencies.d/base": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+    "manual_location_gateway/rootfs/etc/s6-overlay/s6-rc.d/init-manual-location/run": "61d20f24b62cdc7a0f58d14b8c41b613aef711d975468b6d0e16daaf2e4eb672",
+    "manual_location_gateway/rootfs/etc/s6-overlay/s6-rc.d/init-manual-location/type": "aab38fd7998987a22d44fda7822afcfa69d039d3ba02b1f707f064df64352217",
+    "manual_location_gateway/rootfs/etc/s6-overlay/s6-rc.d/init-manual-location/up": "6858c308a98b405333415159e9c4f245b38a0f04d352d7d340efb528c4cb8964",
+    "manual_location_gateway/rootfs/etc/s6-overlay/s6-rc.d/nginx/dependencies.d/init-manual-location": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+    "manual_location_gateway/rootfs/etc/s6-overlay/s6-rc.d/nginx/finish": "b497ec2d540fdca1ee797e2565de502c8fefdab983dd9b95b64339741457cdb3",
+    "manual_location_gateway/rootfs/etc/s6-overlay/s6-rc.d/nginx/run": "509fff5ddc843dce9c0f0506e436c358e57b9d70e247b5de8ad299b589abf5c1",
+    "manual_location_gateway/rootfs/etc/s6-overlay/s6-rc.d/nginx/type": "d0001a150b83f68f09004c5059045cb76a3f064eed4d42ce072bc3722c118006",
+    "manual_location_gateway/rootfs/etc/s6-overlay/user-bundles.d/user/contents.d/gateway": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+    "manual_location_gateway/rootfs/etc/s6-overlay/user-bundles.d/user/contents.d/init-manual-location": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+    "manual_location_gateway/rootfs/etc/s6-overlay/user-bundles.d/user/contents.d/nginx": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+    "repository.yaml": "b8ece273dd86dbc5ad7b8adc1d2cce855071e8fe5ef4477483525037008cedca"
+  },
+  "package_sha256": "f507477ac262431cbf7d8ce3bd67a36f18b2b3b8ef787c531e7c7a430e73b5c4",
+  "repository_url": "https://github.com/Primo83/ha-manual-location#codex/gateway-apps",
+  "source_commit": "3aa303b1c74d2f6d9482972a51aef61b2431fa3f",
+  "version": 1
+}

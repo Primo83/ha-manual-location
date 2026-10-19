@@ -1,0 +1,4 @@
+#!/command/with-contenv bash
+set -eu
+cd /opt/manual-location
+exec /opt/venv/bin/python -m gateway.production prepare

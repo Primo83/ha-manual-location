@@ -1,0 +1,61 @@
+name: Manual Location Gateway
+version: "2.0.0"
+slug: manual_location_gateway
+description: Bramka lokalizacji przed Home Assistant
+url: https://github.com/Primo83/ha-manual-location/tree/codex/gateway-apps
+arch:
+  - aarch64
+homeassistant: "2026.9.4"
+startup: services
+boot: manual
+init: false
+host_network: true
+tmpfs: true
+apparmor: true
+homeassistant_api: true
+hassio_api: false
+auth_api: false
+docker_api: false
+ingress: false
+watchdog: "http://[HOST]:18326/live"
+timeout: 30
+map:
+  - type: app_config
+    path: /bootstrap
+    read_only: false
+  - type: homeassistant_config
+    path: /homeassistant
+    read_only: true
+  - type: ssl
+    path: /ssl
+    read_only: true
+options:
+  public_url: null
+  manual_entry_id: null
+  protected_person: null
+  protected_tracker: null
+  protected_webhook: null
+  control_token: null
+  passthrough_webhooks: []
+  denied_webhooks: []
+  mode: staging
+  certificate: fullchain.pem
+  private_key: privkey.pem
+  client_certificate: manual-location-gateway-client.pem
+  client_key: manual-location-gateway-client.key
+schema:
+  public_url: url
+  manual_entry_id: str
+  protected_person: str
+  protected_tracker: str
+  protected_webhook: password
+  control_token: password(32,256)
+  passthrough_webhooks:
+    - password
+  denied_webhooks:
+    - password
+  mode: list(staging|production)
+  certificate: str
+  private_key: str
+  client_certificate: str
+  client_key: str

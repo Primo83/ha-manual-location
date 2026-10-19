@@ -1,0 +1,7 @@
+#!/command/with-contenv bash
+set -eu
+status="${1}"
+if [[ "${status}" -eq 256 ]]; then status=$((128 + ${2})); fi
+if [[ "${status}" -eq 0 ]]; then status=1; fi
+printf '%s' "${status}" > /run/s6-linux-init-container-results/exitcode
+exec /run/s6/basedir/bin/halt
