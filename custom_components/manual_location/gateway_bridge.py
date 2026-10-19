@@ -87,7 +87,20 @@ class GatewayBridge:
                 or type(value.get("sequence")) is not int or value["sequence"] < 0
                 or any(key in value and type(value[key]) is not bool for key in ("replay", "recovery"))):
             raise GatewayError("invalid gateway identity")
-        return {key: value[key] for key in ("origin", "person_id", "sequence", "verified", "replay", "recovery") if key in value}
+        metadata = {"history_id", "grant", "native_timestamp"}
+        if metadata.intersection(value):
+            if (origin != "phone" or not metadata.issubset(value)
+                    or any(not isinstance(value[key], str) or not 1 <= len(value[key]) <= 128 for key in metadata)):
+                raise GatewayError("invalid history receipt")
+            from datetime import datetime
+
+            try:
+                instant = datetime.fromisoformat(value["native_timestamp"])
+                if instant.tzinfo is None:
+                    raise ValueError
+            except ValueError:
+                raise GatewayError("invalid history receipt") from None
+        return {key: value[key] for key in ("origin", "person_id", "sequence", "verified", "replay", "recovery", *metadata) if key in value}
 
     def _status(self, result):
         if result.get("person_id") != self.person_id or result.get("mode") not in {"custom", "warmup", "normal"}:

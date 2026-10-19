@@ -1,6 +1,7 @@
 """A private presentation layer for manually selected person positions."""
 
 from pathlib import Path
+import hmac
 
 from aiohttp import web
 
@@ -59,7 +60,37 @@ class GatewaySessionView(HomeAssistantView):
         bridge = coordinator.gateway if coordinator is not None else None
         if bridge is None or not coordinator.loaded or (not bridge.ready and request.query.get("control") != "1"):
             raise web.HTTPServiceUnavailable()
+        if request.query.get("control") != "1" and not await coordinator.location_history.async_ready():
+            raise web.HTTPServiceUnavailable()
         return web.json_response({"session": bridge.session})
+
+
+class GatewayHistoryView(HomeAssistantView):
+    """Accept an approved native event from the authenticated private gateway."""
+
+    url = "/api/manual_location/gateway_history"
+    name = f"{DOMAIN}:gateway_history"
+    requires_auth = True
+
+    async def post(self, request):
+        coordinator = request.app[KEY_HASS].data.get(DOMAIN)
+        bridge = coordinator.gateway if coordinator is not None else None
+        if (not request["hass_user"].is_admin or bridge is None or not coordinator.loaded
+                or not hmac.compare_digest(request.headers.get("X-Manual-Location-Key", ""), bridge._token)):
+            raise web.HTTPForbidden()
+        raw = bytearray()
+        async for chunk in request.content.iter_chunked(4096):
+            raw.extend(chunk)
+            if len(raw) > 16384:
+                raise web.HTTPRequestEntityTooLarge(max_size=16384, actual_size=len(raw))
+        try:
+            import json
+
+            result = await coordinator.location_history.async_receive(json.loads(raw))
+        except Exception:
+            # Neither an exception payload nor a request contains loggable data.
+            return web.json_response({"error": "history unavailable"}, status=409)
+        return web.json_response(result)
 
 
 async def async_setup(hass, config):
@@ -89,6 +120,7 @@ async def async_setup_entry(hass, entry):
     if not hass.data.get(f"{DOMAIN}_static_registered"):
         hass.http.register_view(FrontendView)
         hass.http.register_view(GatewaySessionView)
+        hass.http.register_view(GatewayHistoryView)
         hass.data[f"{DOMAIN}_static_registered"] = True
     await async_register_panel(
         hass, frontend_url_path=PANEL_PATH, webcomponent_name="manual-location-admin",
@@ -112,3 +144,6 @@ async def async_remove_entry(hass, entry):
     await ManualLocation(hass, entry).store.async_remove()
     await PlaceGeocoder(hass, entry).store.async_remove()
     await Store(hass, 1, CACHE_KEY, private=True, atomic_writes=True).async_remove()
+    from .gps_history import GpsHistory
+
+    await GpsHistory.async_remove_files(hass)

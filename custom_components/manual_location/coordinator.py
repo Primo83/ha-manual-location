@@ -311,8 +311,17 @@ class ManualLocation:
         self._refresh_phone_until: dict[tuple[str, str], float] = {}
         self._refresh_cleanups = {}
         self.gateway = GatewayBridge.from_entry(hass, entry)
+        self._location_history = None
         self._gateway_retry_cancel = None
         self._gateway_applied = None
+
+    @property
+    def location_history(self):
+        if self._location_history is None:
+            from .location_history import LocationHistory
+
+            self._location_history = LocationHistory(self)
+        return self._location_history
 
     def _gateway_current(self, snapshot):
         if self.gateway is None or not snapshot["enabled"]:
@@ -321,16 +330,22 @@ class ManualLocation:
         return person["current"] if person and person["enabled"] else None
 
     def _gateway_failed(self):
+        self.location_history.close_started()
         self.gateway.invalidate()
         self.gateway.pending = True
+        self._schedule_gateway_retry()
+
+    def _schedule_gateway_retry(self):
         if self.loaded and self._started and self._gateway_retry_cancel is None:
             self._gateway_retry_cancel = async_track_point_in_utc_time(
                 self.hass, self._async_gateway_retry, datetime.now(UTC) + timedelta(seconds=5),
             )
 
     async def _async_gateway_close(self, revision):
+        self.location_history.close_started()
         try:
             await self.gateway.close(self.gateway.key(revision, "close"))
+            self.location_history.close_confirmed()
             self._gateway_applied = None
         except GatewayError:
             self._gateway_failed()
@@ -347,7 +362,9 @@ class ManualLocation:
             await self._async_gateway_close(self.data["revision"])
             return
         try:
+            self.location_history.close_started()
             await self.gateway.custom(self.gateway.key(self.data["revision"], "custom", current), current)
+            self.location_history.close_confirmed()
             self._gateway_applied = deepcopy(current)
         except GatewayError:
             self._gateway_failed()
@@ -360,6 +377,15 @@ class ManualLocation:
         async with self._save_lock:
             if self.loaded:
                 await self._async_gateway_sync()
+                try:
+                    await self.location_history.async_recover()
+                except Exception:
+                    # A history-only failure does not require republishing an
+                    # already confirmed own point (or creating new Recorder IDs).
+                    if self.gateway.ready and not self.gateway.pending:
+                        self._schedule_gateway_retry()
+                    else:
+                        self._gateway_failed()
 
     async def async_gateway_status(self, connection, token):
         self.require_session(connection, token)
@@ -725,6 +751,9 @@ class ManualLocation:
     async def _commit(self, snapshot, *, gateway_normal=False):
         """Commit history/current/cursors together and confirm actual persistence."""
         self._require_loaded()
+        if (self._location_history is not None
+                and self._location_history.db is not None and self._location_history.db.pending):
+            raise LocationError("history_recovering")
         # Any later successful write makes a previous local suspension durable.
         for scenario_id in self._suspended:
             if (scenario := snapshot["scenarios"].get(scenario_id)) and scenario["status"] == "running":
@@ -779,7 +808,9 @@ class ManualLocation:
             await self._commit(snapshot, gateway_normal=gateway_mode == "normal")
             if gateway_mode == "normal" and self.gateway.ready and not self.gateway.pending:
                 try:
-                    await self.gateway.normal(self.gateway.key(snapshot["revision"], "normal"))
+                    key = self.gateway.key(snapshot["revision"], "normal")
+                    await self.location_history.begin_normal(key)
+                    await self.gateway.normal(key)
                 except GatewayError:
                     self._gateway_failed()  # Automatic retry may only close, never reopen GPS.
                 except asyncio.CancelledError:
@@ -960,6 +991,15 @@ class ManualLocation:
         if self.gateway is not None:
             async with self._save_lock:
                 await self._async_gateway_close(self.data["revision"])
+            # Restore the own target before a pending history deletion can resume.
+            async with self._save_lock:
+                await self._async_gateway_sync()
+                try:
+                    await self.location_history.async_prepare()
+                    await self.location_history.async_recover()
+                except Exception:
+                    if self.location_history.db is not None and self.location_history.db.pending:
+                        self._gateway_failed()
         await self._async_run_due(datetime.now(UTC))
         if self.gateway is not None:
             async with self._save_lock:
@@ -996,6 +1036,11 @@ class ManualLocation:
         async with self._save_lock:
             if not self.loaded:
                 return
+            if (self._location_history is not None and self._location_history.db is not None
+                    and self._location_history.db.pending):
+                self._retry_at = datetime.now(UTC) + timedelta(seconds=5)
+                self._reschedule()
+                return
             # HA passes the originally requested deadline to this callback, even
             # when it fires late. Catch up to actual UTC now in one transaction.
             now = datetime.now(UTC)
@@ -1028,6 +1073,8 @@ class ManualLocation:
         self.loaded = False
         if self.gateway is not None:
             self.gateway.ready = False
+        if self._location_history is not None:
+            self._location_history.stop()
         if self._gateway_retry_cancel is not None:
             self._gateway_retry_cancel()
             self._gateway_retry_cancel = None
@@ -1045,6 +1092,8 @@ class ManualLocation:
             if self.gateway is not None:
                 self.gateway.ready = False
             self.sessions.clear()
+        if self._location_history is not None:
+            await self._location_history.async_shutdown()
 
     async def async_change_pin(self, connection, token, new_pin):
         async with self._auth_lock:
@@ -1091,3 +1140,17 @@ class ManualLocation:
                 overrides[entity_id] = {"current": person["current"], "history": history}
         activity = {entity_id: self.phone_activity.summary(connection.user, entity_id) for entity_id in entity_ids}
         return deepcopy({"revision": self.data["revision"], "overrides": overrides, "activity": activity})
+
+    async def async_view(self, connection, entity_ids, start, end):
+        for attempt in range(2):
+            result = self.view(connection, entity_ids, start, end)
+            if self.gateway is not None:
+                try:
+                    result = await self.location_history.async_view(result, entity_ids, start, end)
+                except LocationError as error:
+                    if error.code == "history_changed" and attempt == 0:
+                        continue
+                    raise
+                # Recheck entity permissions after the asynchronous history read.
+                self.view(connection, entity_ids, start, end)
+            return result

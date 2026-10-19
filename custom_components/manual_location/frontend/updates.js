@@ -1,6 +1,6 @@
-import { callWS } from "./data.js?v=2.0.0";
+import { callWS } from "./data.js?v=2.0.1";
 
-export const VERSION = "2.0.0";
+export const VERSION = "2.0.1";
 
 // Shared even when HA loads the card and panel through different module URLs.
 const stateKey = Symbol.for("manual-location-updates");
