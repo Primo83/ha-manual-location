@@ -18,13 +18,20 @@
         "description": "Enter your Geoapify Free API key to enable search. Search text is sent to Geoapify only after Search or Enter. The Free plan has usage limits and no availability guarantee. A blank key keeps the current setting; check Remove to disable search. Manual maps and saving work without a key.",
         "data": {
           "geoapify_api_key": "Geoapify API key (leave blank to keep)",
-          "remove_api_key": "Remove the saved key and disable search"
+          "remove_api_key": "Remove the saved key and disable search",
+          "configure_gateway": "Configure the independent location gateway"
         }
+      },
+      "gateway": {
+        "title": "Independent location gateway",
+        "description": "Connect the installed gateway for the protected person. This does not enable GPS. Use the private address and secret generated during gateway setup.",
+        "data": {"url": "Private gateway address", "person_id": "Protected person entity", "token": "Gateway secret"}
       }
     },
     "error": {
       "invalid_api_key": "Enter 16–128 ASCII letters, digits, underscores or hyphens, or leave this field blank.",
-      "invalid_input": "Check the supplied values."
+      "invalid_input": "Check the supplied values.",
+      "invalid_gateway": "Check the private loopback address, person entity and gateway secret."
     }
   }
 }

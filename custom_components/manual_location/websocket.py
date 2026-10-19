@@ -18,6 +18,7 @@ FIELDS = {
     "view": {"entity_ids", "start", "end"},
     "unlock": {"pin"},
     "admin_get": {"token"},
+    "gateway_status": {"token"},
     "quick_save_info": set(),
     "refresh_location": {"entity_id"},
     "geocode": {"token", "query"},
@@ -53,6 +54,7 @@ async def async_handle_command(hass, connection, msg):
             fields.discard("scenarios")
             fields.discard("quick_save")
             fields.discard("activity")
+            fields.discard("gateway_mode")
         if operation in {"scenario_save", "scenario_action"} and "scenario_id" not in fields:
             raise LocationError("client_outdated")
         # Older clients omit the optional upper bound and keep fixed intervals.
@@ -72,6 +74,8 @@ async def async_handle_command(hass, connection, msg):
             result = await coordinator.async_unlock(connection, msg["pin"])
         elif operation == "admin_get":
             result = coordinator.admin_get(connection, msg["token"])
+        elif operation == "gateway_status":
+            result = await coordinator.async_gateway_status(connection, msg["token"])
         elif operation == "quick_save_info":
             result = coordinator.quick_save_info(connection)
         elif operation == "refresh_location":
@@ -107,6 +111,7 @@ async def async_handle_command(hass, connection, msg):
                 connection, msg["token"], msg["revision"], msg["enabled"], msg["persons"],
                 **({"quick_save": msg["quick_save"]} if "quick_save" in msg else {}),
                 **({"activity": msg["activity"]} if "activity" in msg else {}),
+                **({"gateway_mode": msg["gateway_mode"]} if "gateway_mode" in msg else {}),
             )
         elif operation == "scenario_save":
             result = await coordinator.async_save_scenario(

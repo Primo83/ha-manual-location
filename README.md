@@ -2,7 +2,15 @@
 
 Ręczne pozycje i historia osób na wybranych kartach mapy Home Assistanta. Administrator zarządza nimi we wspólnym panelu **Ustawienia mapy**, chronionym uprawnieniami administratora HA i dodatkowym PIN-em.
 
-Integracja zmienia prezentację w kartach `custom:manual-location-map`. Ręczne pozycje nie zmieniają encji `person`, GPS z telefonów, automatyzacji ani historii Recorder. Osobne przytrzymanie systemowej ikony przez administratora może poprosić przypisany telefon Companion o nową lokalizację, która trafia zwykłą drogą do HA. Inne ekrany i API Home Assistanta mogą nadal pokazywać oryginalne dane. PIN nie chroni przed właścicielem serwera z dostępem do plików lub kodu.
+Bez skonfigurowanej niezależnej bramki integracja zachowuje działanie 1.x: zmienia prezentację w kartach `custom:manual-location-map`, a encje `person`, GPS z telefonów, automatyzacje i Recorder pozostają niezależne. Osobne przytrzymanie systemowej ikony przez administratora może poprosić przypisany telefon Companion o nową lokalizację. Inne ekrany i API mogą wtedy pokazywać oryginalne dane. PIN nie chroni przed właścicielem serwera z dostępem do plików lub kodu.
+
+## Opcjonalna bramka 2.0
+
+Samo pobranie aktualizacji HACS **nie blokuje raportów telefonu**. Wariant 2.0 wymaga niezależnej App z repozytorium `https://github.com/Primo83/ha-manual-location#codex/gateway-apps`, prywatnego wejścia Core dostępnego wyłącznie na loopbacku oraz podłączenia adaptera w opcjach integracji. Własny bieżący punkt trafia wtedy do natywnych encji tracker i person i może uruchamiać automatyzacje oraz zapisy Recorder. Edytowana historia w panelu nadal pozostaje osobna od Recorder.
+
+Obsługa pozostaje w **Ustawieniach mapy**: wybierz źródło i kliknij **Zapisz wszystkie zmiany**. Świadomy wybór Home Assistant rozpoczyna 300 sekund karencji; przez ten czas nadal obowiązuje własny punkt. Po karencji dopuszczane są raporty Companion, również potencjalnie znacznie opóźnione — czas oczekiwania nie dowodzi świeżości pomiaru. Restart, awaria, Stop i koniec własnej trasy nie włączają GPS. Po powrocie działania zapisana trasa nadrabia punkty jak 1.x.
+
+Awaria App zamyka drogę do panelu i raportowania; nie uruchamia bezpośredniego publicznego Core. Zachowaj niezależny dostęp serwisowy. Przy wycofywaniu tej konfiguracji pozostaw Core prywatny i bramkę zamkniętą; przywrócenie publicznego Core usuwa ochronę. Nie edytuj ręcznie `.storage`. Dalsza instrukcja HACS opisuje instalację samej integracji i jej podstawowe działanie bez bramki.
 
 ## Instalacja przez HACS
 

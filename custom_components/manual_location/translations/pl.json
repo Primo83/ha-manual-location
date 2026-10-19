@@ -18,13 +18,20 @@
         "description": "Wprowadź własny klucz Geoapify Free, aby włączyć wyszukiwanie. Tekst zapytania trafia do Geoapify wyłącznie po Szukaj lub Enter. Plan Free ma limity i nie gwarantuje dostępności. Puste pole zachowuje obecne ustawienie; zaznacz usunięcie, aby wyłączyć wyszukiwarkę. Ręczna mapa i zapis działają bez klucza.",
         "data": {
           "geoapify_api_key": "Klucz API Geoapify (puste pole zachowuje obecny)",
-          "remove_api_key": "Usuń zapisany klucz i wyłącz wyszukiwarkę"
+          "remove_api_key": "Usuń zapisany klucz i wyłącz wyszukiwarkę",
+          "configure_gateway": "Skonfiguruj niezależną bramkę lokalizacji"
         }
+      },
+      "gateway": {
+        "title": "Niezależna bramka lokalizacji",
+        "description": "Połącz zainstalowaną bramkę z chronioną osobą. Ta czynność nie włącza GPS. Użyj prywatnego adresu i sekretu wygenerowanych podczas konfiguracji bramki.",
+        "data": {"url": "Prywatny adres bramki", "person_id": "Encja chronionej osoby", "token": "Sekret bramki"}
       }
     },
     "error": {
       "invalid_api_key": "Wpisz 16–128 znaków ASCII: litery, cyfry, podkreślenia lub myślniki, albo pozostaw pole puste.",
-      "invalid_input": "Sprawdź wprowadzone wartości."
+      "invalid_input": "Sprawdź wprowadzone wartości.",
+      "invalid_gateway": "Sprawdź prywatny adres loopback, encję osoby i sekret bramki."
     }
   }
 }

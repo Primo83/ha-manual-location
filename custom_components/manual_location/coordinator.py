@@ -24,6 +24,7 @@ from .const import (
     SCENARIO_RETRY_SECONDS, SCENARIO_STORAGE_ATTEMPTS, SESSION_SECONDS, STORAGE_VERSION,
 )
 from .security import hash_pin, valid_pin, verify_pin
+from .gateway_bridge import GatewayBridge, GatewayError
 
 _LOGGER = logging.getLogger(__name__)
 _REFRESH_LOGGER = logging.getLogger(f"{__name__}.location_refresh")
@@ -309,6 +310,72 @@ class ManualLocation:
         self._refresh_person_until: dict[str, float] = {}
         self._refresh_phone_until: dict[tuple[str, str], float] = {}
         self._refresh_cleanups = {}
+        self.gateway = GatewayBridge.from_entry(hass, entry)
+        self._gateway_retry_cancel = None
+        self._gateway_applied = None
+
+    def _gateway_current(self, snapshot):
+        if self.gateway is None or not snapshot["enabled"]:
+            return None
+        person = snapshot["persons"].get(self.gateway.person_id)
+        return person["current"] if person and person["enabled"] else None
+
+    def _gateway_failed(self):
+        self.gateway.invalidate()
+        self.gateway.pending = True
+        if self.loaded and self._started and self._gateway_retry_cancel is None:
+            self._gateway_retry_cancel = async_track_point_in_utc_time(
+                self.hass, self._async_gateway_retry, datetime.now(UTC) + timedelta(seconds=5),
+            )
+
+    async def _async_gateway_close(self, revision):
+        try:
+            await self.gateway.close(self.gateway.key(revision, "close"))
+            self._gateway_applied = None
+        except GatewayError:
+            self._gateway_failed()
+        except asyncio.CancelledError:
+            self._gateway_failed()
+            raise
+
+    async def _async_gateway_sync(self):
+        """The Store is the latest own target; never enqueue older positions."""
+        current = self._gateway_current(self.data)
+        if self.gateway.ready and not self.gateway.pending and self._gateway_applied == current:
+            return
+        if current is None:
+            await self._async_gateway_close(self.data["revision"])
+            return
+        try:
+            await self.gateway.custom(self.gateway.key(self.data["revision"], "custom", current), current)
+            self._gateway_applied = deepcopy(current)
+        except GatewayError:
+            self._gateway_failed()
+        except asyncio.CancelledError:
+            self._gateway_failed()
+            raise
+
+    async def _async_gateway_retry(self, _now):
+        self._gateway_retry_cancel = None
+        async with self._save_lock:
+            if self.loaded:
+                await self._async_gateway_sync()
+
+    async def async_gateway_status(self, connection, token):
+        self.require_session(connection, token)
+        if self.gateway is None:
+            return {"enabled": False}
+        try:
+            result = await self.gateway.status()
+            self.require_session(connection, token)
+            return result
+        except GatewayError:
+            self.require_session(connection, token)
+            self._gateway_failed()
+            return {"enabled": True, "available": False, "person_id": self.gateway.person_id,
+                    "mode": "blocked", "pending": True, "gps_blocked": False, "remaining_seconds": 0,
+                    "has_custom_point": False, "replay_required": False, "upstream_uncertain": False,
+                    "recovery_retryable": False, "last_custom_receipt": None, "last_phone_receipt": None}
 
     @property
     def phone_activity(self):
@@ -456,6 +523,19 @@ class ManualLocation:
             raise LocationError("refresh_limited")
         manual = self.data["persons"].get(entity_id)
         manual_active = self.data["enabled"] and manual and manual["enabled"]
+        protected_gateway = self.gateway if self.gateway is not None and self.gateway.person_id == entity_id else None
+        gateway_sequence = 0
+        if protected_gateway is not None:
+            try:
+                gateway_status = await protected_gateway.status()
+            except GatewayError:
+                self._gateway_failed()
+                raise LocationError("refresh_unavailable") from None
+            if gateway_status["mode"] != "normal":
+                self._refresh_person_until[entity_id] = now + 60
+                return {"reported": False} if wait_for_report else {}
+            receipt = gateway_status["last_phone_receipt"]
+            gateway_sequence = receipt["sequence"] if receipt is not None else 0
         if manual_active:
             self._refresh_person_until[entity_id] = now + 60
             if not wait_for_report:
@@ -529,6 +609,7 @@ class ManualLocation:
 
         report = self.hass.loop.create_future() if wait_for_report else None
         unsubscribe = None
+        gateway_poll = None
         task = asyncio.current_task()
         def cleanup():
             nonlocal unsubscribe
@@ -537,10 +618,12 @@ class ManualLocation:
                 unsubscribe = None
             if report is not None and not report.done():
                 report.cancel()
+            if gateway_poll is not None:
+                gateway_poll.cancel()
 
         if wait_for_report:
             self._refresh_cleanups[task] = cleanup
-            if resolved is not None:
+            if resolved is not None and protected_gateway is None:
                 @callback
                 def receive_report(_data):
                     try:
@@ -562,6 +645,32 @@ class ManualLocation:
                 unsubscribe = async_dispatcher_connect(
                     self.hass, f"mobile_app_location_update_{phone_key[0]}", receive_report,
                 )
+            elif resolved is not None:
+                async def wait_gateway_report():
+                    try:
+                        while not report.done():
+                            status = await protected_gateway.status()
+                            binding = current_binding()
+                            if binding is None or binding[1] != phone_key:
+                                raise LocationError("refresh_unavailable")
+                            receipt = status["last_phone_receipt"]
+                            # A correlated phone RPC is temporarily uncertain until
+                            # its native response closes. Keep the existing bounded
+                            # wait; neither that transient status nor an own receipt
+                            # is evidence of a completed phone report.
+                            if status["mode"] == "normal" and receipt is not None and receipt["sequence"] > gateway_sequence:
+                                report.set_result(True)
+                                return
+                            await asyncio.sleep(0.25)
+                    except GatewayError:
+                        self._gateway_failed()
+                        if not report.done():
+                            report.set_exception(LocationError("refresh_unavailable"))
+                    except LocationError:
+                        if not report.done():
+                            report.set_exception(LocationError("refresh_unavailable"))
+
+                gateway_poll = self.hass.async_create_task(wait_gateway_report(), "Manual Location phone receipt")
         try:
             async with asyncio.timeout(LOCATION_REPORT_TIMEOUT if wait_for_report else 12):
                 if resolved is not None:
@@ -613,7 +722,7 @@ class ManualLocation:
         if revision != self.data["revision"]:
             raise LocationError("revision_conflict")
 
-    async def _commit(self, snapshot):
+    async def _commit(self, snapshot, *, gateway_normal=False):
         """Commit history/current/cursors together and confirm actual persistence."""
         self._require_loaded()
         # Any later successful write makes a previous local suspension durable.
@@ -621,6 +730,14 @@ class ManualLocation:
             if (scenario := snapshot["scenarios"].get(scenario_id)) and scenario["status"] == "running":
                 scenario.update(status="stopped", reason="storage_error")
         validate_running_intervals(snapshot["scenarios"])
+        gateway_changed = self.gateway is not None and self._gateway_current(snapshot) != self._gateway_current(self.data)
+        gateway_close = self.gateway is not None and (
+            (self.data["enabled"] and not snapshot["enabled"])
+            or (self.gateway.person_id in self.data["persons"] and self.gateway.person_id not in snapshot["persons"])
+        )
+        if self.gateway is not None and (gateway_changed or gateway_close or gateway_normal):
+            # Invalidate the old normal epoch before touching persistent data.
+            await self._async_gateway_close(snapshot["revision"])
         await self.store.async_save(snapshot)
         if await self.store.async_load() != snapshot:
             raise LocationError("storage_error")
@@ -629,8 +746,10 @@ class ManualLocation:
         self._retry_at = None
         self._storage_attempts = 0
         self._suspended.clear()
+        if self.gateway is not None and (gateway_changed or self.gateway.pending):
+            await self._async_gateway_sync()
 
-    async def async_save(self, connection, token, revision, enabled, persons, *, quick_save=_UNSET, activity=_UNSET):
+    async def async_save(self, connection, token, revision, enabled, persons, *, quick_save=_UNSET, activity=_UNSET, gateway_mode=_UNSET):
         from .phone_activity import validate_activity
 
         async with self._save_lock:
@@ -645,6 +764,11 @@ class ManualLocation:
                 "quick_save": deepcopy(self.data["quick_save"]) if quick_save is _UNSET else validate_quick_save(self.hass, quick_save),
                 "activity": deepcopy(self.data["activity"]) if activity is _UNSET else validate_activity(self.hass, activity, self.data["activity"]),
             }
+            if gateway_mode is not _UNSET:
+                if (gateway_mode != "normal" or self.gateway is None or not enabled
+                        or self._gateway_current(snapshot) is not None
+                        or self.hass.states.get(self.gateway.person_id) is None):
+                    raise LocationError("invalid_input")
             for scenario in snapshot["scenarios"].values():
                 entity_id = scenario["entity_id"]
                 if scenario["status"] == "running":
@@ -652,7 +776,15 @@ class ManualLocation:
                         scenario.update(status="stopped", reason="global_disabled")
                     elif snapshot["persons"].get(entity_id) != self.data["persons"].get(entity_id):
                         scenario.update(status="stopped", reason="manual_change")
-            await self._commit(snapshot)
+            await self._commit(snapshot, gateway_normal=gateway_mode == "normal")
+            if gateway_mode == "normal" and self.gateway.ready and not self.gateway.pending:
+                try:
+                    await self.gateway.normal(self.gateway.key(snapshot["revision"], "normal"))
+                except GatewayError:
+                    self._gateway_failed()  # Automatic retry may only close, never reopen GPS.
+                except asyncio.CancelledError:
+                    self._gateway_failed()
+                    raise
             self._reschedule()
             self.phone_activity.rebind()
             return self._snapshot()
@@ -814,7 +946,7 @@ class ManualLocation:
         _REFRESH_LOGGER.info("Location refresh diagnostics ready")
         self.phone_activity.start()
         if self.hass.state == CoreState.running:
-            await self._async_run_due(datetime.now(UTC))
+            await self._async_begin()
         else:
             self._startup_cancel = self.hass.bus.async_listen_once(
                 EVENT_HOMEASSISTANT_STARTED, self._async_ha_started,
@@ -822,7 +954,16 @@ class ManualLocation:
 
     async def _async_ha_started(self, event):
         self._startup_cancel = None
+        await self._async_begin()
+
+    async def _async_begin(self):
+        if self.gateway is not None:
+            async with self._save_lock:
+                await self._async_gateway_close(self.data["revision"])
         await self._async_run_due(datetime.now(UTC))
+        if self.gateway is not None:
+            async with self._save_lock:
+                await self._async_gateway_sync()
 
     def _reschedule(self):
         for name in ("_timer_cancel", "_state_cancel"):
@@ -885,6 +1026,11 @@ class ManualLocation:
     async def async_shutdown(self):
         """Cancel timers/listeners and drain the one writer before unloading."""
         self.loaded = False
+        if self.gateway is not None:
+            self.gateway.ready = False
+        if self._gateway_retry_cancel is not None:
+            self._gateway_retry_cancel()
+            self._gateway_retry_cancel = None
         for task, cleanup in list(self._refresh_cleanups.items()):
             cleanup()
             task.cancel()
@@ -896,6 +1042,8 @@ class ManualLocation:
                 cancel()
                 setattr(self, name, None)
         async with self._save_lock:
+            if self.gateway is not None:
+                self.gateway.ready = False
             self.sessions.clear()
 
     async def async_change_pin(self, connection, token, new_pin):

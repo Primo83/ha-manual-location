@@ -8,6 +8,7 @@ from homeassistant.helpers.selector import TextSelector, TextSelectorConfig, Tex
 
 from .const import DOMAIN
 from .geocoding import API_KEY_OPTION, valid_api_key
+from .gateway_bridge import GatewayBridge, GatewayError
 from .security import hash_pin, valid_pin
 
 
@@ -58,6 +59,9 @@ class ManualLocationOptionsFlow(OptionsFlow):
                     options.pop(API_KEY_OPTION, None)
                 elif key:
                     options[API_KEY_OPTION] = key
+                if user_input.get("configure_gateway") is True:
+                    self._pending_options = options
+                    return await self.async_step_gateway()
                 return self.async_create_entry(title="", data=options)
         return self.async_show_form(
             step_id="init",
@@ -66,6 +70,31 @@ class ManualLocationOptionsFlow(OptionsFlow):
                     TextSelectorConfig(type=TextSelectorType.PASSWORD, autocomplete="one-time-code")
                 ),
                 vol.Optional("remove_api_key", default=False): bool,
+                vol.Optional("configure_gateway", default=False): bool,
+            }),
+            errors=errors,
+        )
+
+    async def async_step_gateway(self, user_input=None) -> ConfigFlowResult:
+        """Attach the independent gateway through HA's supported options API."""
+        errors = {}
+        if user_input is not None:
+            try:
+                GatewayBridge(self.hass, self.config_entry, user_input)
+            except GatewayError:
+                errors["base"] = "invalid_gateway"
+            else:
+                options = dict(getattr(self, "_pending_options", self.config_entry.options))
+                options["gateway"] = dict(user_input)
+                return self.async_create_entry(title="", data=options)
+        return self.async_show_form(
+            step_id="gateway",
+            data_schema=vol.Schema({
+                vol.Required("url"): str,
+                vol.Required("person_id"): str,
+                vol.Required("token"): TextSelector(TextSelectorConfig(
+                    type=TextSelectorType.PASSWORD, autocomplete="one-time-code",
+                )),
             }),
             errors=errors,
         )
