@@ -149,6 +149,16 @@ export function errorText(error) {
   const code = error?.code || error?.message || "unknown_error";
   const messages = {
     revision_conflict: "Dane zmieniono w innej sesji. Twoje zmiany pozostały w formularzu. Wczytaj zapisane dane i wprowadź je ponownie.",
+    invalid_return_time: "Wybierz przyszłą datę i godzinę w strefie Home Assistant. Godzina pominięta lub powtórzona przy zmianie czasu jest niejednoznaczna; wybierz inną.",
+    return_changed: "Termin zmienił się podczas edycji. Wczytaj zapisane dane i ustaw go ponownie.",
+    gateway_return_unavailable: "Termin wymaga bramki z obsługą automatycznego powrotu. Sprawdź jej wersję i połączenie.",
+    gateway_return_unconfirmed: "Nie potwierdzono zapisu terminu. Sprawdź zapisany stan; nie zakładaj, że termin został ustawiony lub anulowany.",
+    gateway_return_recovering: "Trwa powrót do custom. Poczekaj na potwierdzenie własnej pozycji przed zmianą terminu.",
+    gateway_return_requires_custom: "Najpierw zapisz własną pozycję i potwierdź ją w trybie custom. Termin korzysta z zapisanej pozycji.",
+    return_own_unconfirmed: "Własny punkt nie jest potwierdzony. Wybierz „Ręczna (custom)” i „Zapisz wszystkie zmiany”, aby go potwierdzić, a następnie zapisz termin.",
+    return_target_locked: "Anuluj zapisany termin przed zmianą bieżącej własnej pozycji lub uruchomieniem trasy. Niezapisane zmiany pozostały w formularzu.",
+    return_route_running: "Najpierw zatrzymaj trasę tej osoby, a następnie zapisz termin powrotu. Trasa nie została zatrzymana automatycznie.",
+    return_status_unavailable: "Nie potwierdzono stanu bramki. Szkic pozostał w formularzu; sprawdź połączenie przed ponownym zapisem.",
     invalid_pin: "Niepoprawny PIN.",
     rate_limited: "Za dużo prób. Odczekaj 5 minut przed kolejną próbą odblokowania.",
     invalid_token: "Sesja wygasła. Odblokuj panel ponownie.",

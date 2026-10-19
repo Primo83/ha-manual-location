@@ -90,11 +90,11 @@ class LocationHistory:
         except Exception:
             return False
 
-    def close_started(self):
-        now = time.time()
+    def close_started(self, *, cutoff=None):
+        now = time.time() if cutoff is None else cutoff
         for grant in self.grants.values():
-            if grant["closing_at"] is None:
-                grant.update(closing_at=now, deadline=time.monotonic() + 30)
+            if grant["closing_at"] is None or now < grant["closing_at"]:
+                grant.update(closing_at=now, deadline=time.monotonic() + 30, strict_cutoff=cutoff is not None)
         self.active_grant = None
         self.previews.clear()
 
@@ -113,7 +113,9 @@ class LocationHistory:
         grant = self.grants.get(payload["grant"])
         return bool(grant and grant["session"] == payload["source_session"]
                     and (grant["closing_at"] is None or (
-                        time.monotonic() <= grant["deadline"] and payload["lower"] <= grant["closing_at"])))
+                        time.monotonic() <= grant["deadline"] and (
+                            payload["lower"] < grant["closing_at"] if grant.get("strict_cutoff")
+                            else payload["lower"] <= grant["closing_at"]))))
 
     def _snapshots(self):
         snapshots = {}

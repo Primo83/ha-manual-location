@@ -1,8 +1,8 @@
-import { activityPayload, activitySettings, adminPersonOptions, callWS, editHistory, errorText, localDateInput, readPoint, removeHistory } from "./data.js?v=2.0.2";
-import { L, makeMap, mapStyles, popup } from "./map-common.js?v=2.0.2";
-import { registerReloadBlocker, startUpdateCheck } from "./updates.js?v=2.0.2";
-import "./scenarios.js?v=2.0.2";
-import "./place-search.js?v=2.0.2";
+import { activityPayload, activitySettings, adminPersonOptions, callWS, editHistory, errorText, localDateInput, readPoint, removeHistory } from "./data.js?v=2.0.3";
+import { L, makeMap, mapStyles, popup } from "./map-common.js?v=2.0.3";
+import { registerReloadBlocker, startUpdateCheck } from "./updates.js?v=2.0.3";
+import "./scenarios.js?v=2.0.3";
+import "./place-search.js?v=2.0.3";
 
 const DRAFT_COLOR = "#7c3aed";
 const CUSTOM_COLOR = "#1976d2";
@@ -16,6 +16,15 @@ const templateKey = (point) => JSON.stringify([point.timestamp, point.latitude, 
 const deletedPointKey = (point) => JSON.stringify([Date.parse(point.timestamp),
   (point.timestamp.match(/\.(\d+)/)?.[1] || "").slice(3).replace(/0+$/, ""), point.latitude, point.longitude]);
 const historyKey = deletedPointKey;
+const scheduledLocalTime = (seconds, timeZone) => {
+  if (!timeZone || !Number.isInteger(seconds)) return "";
+  try {
+    const parts = Object.fromEntries(new Intl.DateTimeFormat("en-CA", { timeZone, hourCycle: "h23",
+      year: "numeric", month: "2-digit", day: "2-digit", hour: "2-digit", minute: "2-digit", second: "2-digit" })
+      .formatToParts(new Date(seconds * 1000)).map(({ type, value }) => [type, value]));
+    return `${parts.year}-${parts.month}-${parts.day}T${parts.hour}:${parts.minute}:${parts.second}`;
+  } catch { return ""; }
+};
 
 export class ManualLocationAdmin extends HTMLElement {
   constructor() {
@@ -25,6 +34,7 @@ export class ManualLocationAdmin extends HTMLElement {
     this._gatewayStatus = null;
     this._gatewayRequest = 0;
     this._gatewayNormalRequested = null;
+    this._scheduledReturnDraft = null;
     this._selected = "";
     this._editIndex = -1;
     this._currentDrafts = {};
@@ -43,7 +53,7 @@ export class ManualLocationAdmin extends HTMLElement {
     this._scenarioView = { selectedByEntity: {}, personFilter: "", statusFilter: "", nextLocal: 0 };
     const markEditing = (event) => {
       if (["manual-location-scenarios", "manual-location-place-search"].includes(event.target?.tagName?.toLowerCase())) return;
-      if (["person", "person-enabled", "person-ha", "global-enabled", "pin", "new-pin", "ha-delete-start", "ha-delete-end", "ha-delete-custom", "history-show-ha", "history-show-custom"].includes(event.target?.id) || event.target?.id?.startsWith("history-select-") || event.target?.id?.startsWith("ha-history-select-")
+      if (["person", "person-enabled", "person-ha", "global-enabled", "pin", "new-pin", "ha-delete-start", "ha-delete-end", "ha-delete-custom", "history-show-ha", "history-show-custom", "scheduled-return-time"].includes(event.target?.id) || event.target?.id?.startsWith("history-select-") || event.target?.id?.startsWith("ha-history-select-")
         || event.target?.id?.startsWith("activity-")) return;
       this._editing = true; this._syncScenarios(); this._syncHistorySelection(); this._syncLocationButtons(); this._placeSearch?.sync?.();
     };
@@ -104,6 +114,7 @@ export class ManualLocationAdmin extends HTMLElement {
       this._retained = { owner: this._hass?.user?.id, snapshot: this._snapshot, saved: this._savedSnapshot,
         currentDrafts: this._currentDrafts, removedCurrent: this._removedCurrent, deletedHistory: this._deletedHistory,
         dirty: this._dirty, editing: this._editing, editIndex: this._editIndex, gatewayNormalRequested: this._gatewayNormalRequested,
+        scheduledReturnDraft: this._scheduledReturnDraft,
         historyCurrent: !!this.shadowRoot.querySelector("#history-current")?.checked,
         fields: Object.fromEntries(["current-lat", "current-lon", "history-lat", "history-lon", "history-time"].map((id) => [id, this.shadowRoot.querySelector(`#${id}`)?.value ?? ""])) };
     } else if (!preserve) {
@@ -120,6 +131,7 @@ export class ManualLocationAdmin extends HTMLElement {
     this._sourceSnapshot = null;
     this._gatewayStatus = null;
     this._gatewayNormalRequested = null;
+    this._scheduledReturnDraft = null;
     this._currentDrafts = {};
     this._removedCurrent = {};
     this._deletedHistory = {};
@@ -195,7 +207,8 @@ export class ManualLocationAdmin extends HTMLElement {
       : "Miejsce wybrane. Ustaw bieżącą pozycję lub dodaj punkt historii, a następnie zapisz zmiany.", true);
     return true;
   }
-  _hasDrafts() { return !!(this._gatewayNormalRequested || this._dirty || this._editing || this._editIndex >= 0 || Object.values(this._deletedHistory).some((points) => points.length)
+  _hasDrafts() { return !!(this._hasOtherDrafts() || this._scheduledReturnDraft?.dirty || this._retained?.scheduledReturnDraft?.dirty); }
+  _hasOtherDrafts() { return !!(this._gatewayNormalRequested || this._dirty || this._editing || this._editIndex >= 0 || Object.values(this._deletedHistory).some((points) => points.length)
     || Object.keys(this._removedCurrent).length || Object.keys(this._retained?.removedCurrent || {}).length
     || this._retained?.dirty || this._retained?.editing || this._retained?.editIndex >= 0
     || Object.values(this._scenarioDrafts).some((draft) => draft.dirty || draft.editing || draft.routeInput?.dirty)
@@ -309,6 +322,7 @@ export class ManualLocationAdmin extends HTMLElement {
       @media(max-width:900px){.layout{grid-template-columns:1fr}.sidebar{display:grid;grid-template-columns:1fr 1fr}.history-editor{grid-template-columns:1fr 1fr}.map{height:340px}}@media(max-width:580px){main{padding:22px 14px 36px}header{align-items:flex-start}h1{font-size:27px}.sidebar{display:flex}.box{padding:18px}.mapbox{padding:0}.history-editor{grid-template-columns:1fr 1fr}.history-editor .timefield{grid-column:1/-1}.footer{align-items:flex-start;flex-direction:column}.row{align-items:flex-start}.map{height:290px}}
       .map-edit-tools{padding:14px 18px;border-top:2px solid #c65d00;background:#c65d0010}.map-edit-tools p{margin:0 0 10px;font-size:13px;line-height:1.5}.map-edit-tools .actions{align-items:center}.leaflet-tooltip.edit-point-tooltip{white-space:normal;max-width:220px;border-color:#c65d00}
       @media(max-width:580px){#ha-delete-range-fields .pair{grid-template-columns:1fr}}
+      .scheduled-return{border-top:1px solid var(--divider-color,#d9e2e0);padding-top:16px;margin:16px 0}.scheduled-return h3{font-size:14px;margin:0 0 8px}.scheduled-return .field{margin:12px 0 0}.scheduled-return .actions{margin-top:12px}
       .history-filters{display:flex;flex-wrap:wrap;gap:12px 22px;margin:14px 0 8px}.history-filters .toggle{margin:0}.history-filters #history-show-ha{accent-color:#168447}.history-filters #history-show-custom{accent-color:#1976d2}
       .leaflet-tooltip.device-location-tooltip{width:180px;white-space:normal;text-align:center}
       .leaflet-tooltip.history-selection-tooltip{max-width:230px;white-space:normal;text-align:center;background:#fff5b8;color:#172b4d;border:2px solid #172b4d;font-weight:600}.history-selection-times{max-height:190px;overflow:auto;margin-top:6px}
@@ -322,7 +336,7 @@ export class ManualLocationAdmin extends HTMLElement {
       #quick-nickname{overflow-wrap:anywhere}.gps-save{background:#b94700;color:#fff;border:2px solid #963800;min-height:52px;font-weight:750;margin-top:8px;box-shadow:0 3px 9px #b9470033}.gps-save:hover:not(:disabled){background:#9e3c00}.gps-save:disabled{opacity:.55;box-shadow:none}</style><main>${unlocked ? '<header><div><div class="eyebrow">Manual Location</div><h1>Pozycje i historia</h1><p class="sub">Jeden zapis, wspólny dla wszystkich kart mapy.</p></div><button id="lock">Zablokuj panel</button></header><div id="message" role="status" hidden></div>' : ""}
       ${!admin ? '<section class="box lockbox"><h2>Ustawienia</h2><p class="sub">Zaloguj się na konto administratora Home Assistant.</p><div id="message" role="status" hidden></div></section>' : !unlocked ? '<section class="box lockbox"><h2>Odblokuj ustawienia</h2><div id="message" role="status" hidden></div><form id="unlock-form"><div class="field" style="margin-top:22px"><label for="pin">PIN administratora (4–12 znaków: litery A–Z, a–z lub cyfry)</label><input id="pin" type="password" pattern="[A-Za-z0-9]{4,12}" minlength="4" maxlength="12" autocomplete="one-time-code" data-1p-ignore autocapitalize="none" autocorrect="off" spellcheck="false" required></div><button class="primary wide" type="submit">Odblokuj</button><button class="wide gps-save" id="quick-update" type="button" aria-describedby="quick-nickname">Aktualizuj</button><p class="sub" id="quick-nickname"></p></form></section>' : `
       <section class="box person-overview"><h2>Osoby i źródła lokalizacji</h2><p class="sub">Źródło zapisane dla każdej osoby. Wybierz osobę, aby edytować jej ustawienia.</p><div id="person-sources" class="person-sources" aria-label="Osoby i zapisane źródła"></div><label class="toggle global-source"><input type="checkbox" id="global-enabled"><span>Zezwalaj na ręczne lokalizacje<small id="global-source-help">Wspólne dla wszystkich osób. Wyłączenie przełącza wszystkie mapy na Home Assistant.</small></span></label><p class="notice" id="source-conflict" role="status" hidden></p><div class="savebar"><button class="primary" id="save">Zapisz wszystkie zmiany</button><span id="save-state"></span><button id="reload">Wczytaj zapisane dane</button></div></section>
-      <div class="layout"><aside class="sidebar"><section class="box"><h2 id="person-title">Ustawienia osoby</h2><div class="field"><label for="person">Edytujesz ustawienia osoby</label><select id="person"></select></div><fieldset class="source-options"><legend id="person-source-legend">Źródło lokalizacji na mapach</legend><label class="toggle source-choice"><input type="radio" name="person-source" id="person-ha"><span>Home Assistant<small id="person-ha-help">Pozycja i historia z HA</small></span></label><label class="toggle source-choice"><input type="radio" name="person-source" id="person-enabled"><span>Ręczna (custom)<small id="person-custom-help">Pozycje przygotowane w tym panelu</small></span></label></fieldset><p class="source-status" id="person-source-status" role="status"></p><p class="source-pending" id="person-source-pending" role="status" hidden></p><p class="sub source-help" id="person-source-help"></p><p class="notice" id="missing-person-notice" hidden>Tej osoby nie ma już w Home Assistant. Usuń jej ustawienia poniżej, a następnie zapisz wszystkie zmiany. Pozostałe osoby zachowają swoje ustawienia.</p><div class="field" style="margin-top:18px"><label for="person-nickname">Pseudonim na ekranie PIN</label><input id="person-nickname" maxlength="40" autocomplete="off"></div><label class="toggle"><input type="checkbox" id="quick-target"><span>Szybki zapis na ekranie PIN dla tej osoby</span></label><p class="sub">Jedna przypisana osoba na wszystkich urządzeniach. Zapisz wszystkie zmiany, aby zastosować pseudonim i przypisanie.</p><button class="wide danger" id="remove-person">Usuń ustawienia tej osoby</button></section>
+      <div class="layout"><aside class="sidebar"><section class="box"><h2 id="person-title">Ustawienia osoby</h2><div class="field"><label for="person">Edytujesz ustawienia osoby</label><select id="person"></select></div><fieldset class="source-options"><legend id="person-source-legend">Źródło lokalizacji na mapach</legend><label class="toggle source-choice"><input type="radio" name="person-source" id="person-ha"><span>Home Assistant<small id="person-ha-help">Pozycja i historia z HA</small></span></label><label class="toggle source-choice"><input type="radio" name="person-source" id="person-enabled"><span>Ręczna (custom)<small id="person-custom-help">Pozycje przygotowane w tym panelu</small></span></label></fieldset><p class="source-status" id="person-source-status" role="status"></p><p class="source-pending" id="person-source-pending" role="status" hidden></p><p class="sub source-help" id="person-source-help"></p><section class="scheduled-return" id="scheduled-return" hidden><h3>Automatyczny powrót do custom</h3><p class="sub" id="scheduled-return-status" role="status"></p><div class="field"><label for="scheduled-return-time">Data i godzina powrotu</label><input id="scheduled-return-time" type="datetime-local" step="1" aria-describedby="scheduled-return-zone scheduled-return-help"></div><p class="sub" id="scheduled-return-zone"></p><div class="actions"><button id="scheduled-return-save" type="button">Zapisz termin</button><button id="scheduled-return-cancel" type="button">Anuluj termin</button></div><p class="sub" id="scheduled-return-help" role="status"></p><p class="sub">Termin zapisujesz osobno. Powrót ustawi własny punkt przypięty przy zapisie terminu; historia pozostanie wspólna. Anulowanie terminu nie włącza GPS.</p></section><p class="notice" id="missing-person-notice" hidden>Tej osoby nie ma już w Home Assistant. Usuń jej ustawienia poniżej, a następnie zapisz wszystkie zmiany. Pozostałe osoby zachowają swoje ustawienia.</p><div class="field" style="margin-top:18px"><label for="person-nickname">Pseudonim na ekranie PIN</label><input id="person-nickname" maxlength="40" autocomplete="off"></div><label class="toggle"><input type="checkbox" id="quick-target"><span>Szybki zapis na ekranie PIN dla tej osoby</span></label><p class="sub">Jedna przypisana osoba na wszystkich urządzeniach. Zapisz wszystkie zmiany, aby zastosować pseudonim i przypisanie.</p><button class="wide danger" id="remove-person">Usuń ustawienia tej osoby</button></section>
       <section class="box"><h2 id="activity-title">Aktywność telefonu</h2><p class="sub activity-context">Osobne ustawienia tej osoby, niezależne od źródła lokalizacji. Te same zaznaczenia mogą oznaczać takie same ustawienia domyślne.</p><label class="toggle"><input type="checkbox" id="activity-enabled"><span>Pokaż kropkę i czas dla tej osoby</span></label><p class="sub">Zielona przez godzinę od aktywności, potem czerwona. Brak świeżych danych oznacza szarą kropkę. To wskazówka, czy można napisać, a nie potwierdzenie snu.</p><div style="margin-top:18px"><label class="toggle"><input type="checkbox" id="activity-unlock"><span>Odblokowanie<small>Ekran aktywny i telefon odblokowany</small></span></label><label class="toggle"><input type="checkbox" id="activity-walking"><span>Rozpoznane chodzenie lub bieg<small>Wymaga rozpoznanego chodzenia lub biegu</small></span></label><label class="toggle"><input type="checkbox" id="activity-screen"><span>Włączenie ekranu<small>Może zadziałać także po powiadomieniu</small></span></label><label class="toggle"><input type="checkbox" id="activity-tilting"><span>Poruszenie / przechylenie telefonu<small>Wykryte przez Companion; ruch w kieszeni lub aucie też może zadziałać</small></span></label></div><div class="field" style="margin-top:18px"><label for="activity-match">Kiedy pokazać zieloną kropkę?</label><select id="activity-match"><option value="any">Dowolny wybrany sygnał</option><option value="all">Wszystkie wybrane sygnały</option></select><p class="sub">Liczy się ostatnia godzina. W trybie „Wszystkie” sygnały nie muszą wystąpić jednocześnie.</p></div><label class="toggle"><input type="checkbox" id="activity-manual"><span>Ustaw czerwoną do odwołania</span></label><div class="field" style="margin-top:14px"><label for="activity-since">Data i godzina ostatniej aktywności</label><input id="activity-since" type="datetime-local" step="1"></div><p class="sub">Czerwona pojawi się od razu po zapisaniu, z podanym czasem. Wyłącz przełącznik, aby wrócić do automatu.</p><p class="sub">Automat korzysta z czujników Companion włączonych przez właściciela telefonu: Interactive, Keyguard locked i Detected activity. Te ustawienia nie włączają czujników ani uprawnień Androida. Użyj wspólnego przycisku „Zapisz wszystkie zmiany”.</p><button class="wide" id="activity-reset">Przywróć domyślne dla aktywności</button></section>
       <section class="box"><h2>Bieżąca pozycja</h2><p class="current-summary" id="current-summary"></p><div class="field"><button class="wide" id="use-device-location">Użyj lokalizacji tego urządzenia</button><p class="sub">Jednorazowy odczyt z telefonu lub komputera, na którym otwarto panel. Wymaga zgody na lokalizację; dokładność zależy od urządzenia.</p><button class="wide gps-save" id="use-device-location-save" aria-describedby="gps-save-help">Pobierz GPS i zapisz pozycję</button><p class="sub" id="gps-save-help">GPS → bieżąca pozycja i historia → zapis jednym kliknięciem. Najpierw zapisz lub odrzuć pozostałe zmiany. Ręczna zmiana zatrzymuje aktywny plan tej osoby.</p></div><div class="pair"><div class="field"><label for="current-lat">Szerokość</label><input id="current-lat" type="number" step="any" min="-90" max="90"></div><div class="field"><label for="current-lon">Długość</label><input id="current-lon" type="number" step="any" min="-180" max="180"></div></div><button class="wide" id="set-current">Ustaw bieżącą pozycję</button><p class="sub">Każde ustawienie dodaje osobny szkic z godziną. Przed zapisem możesz zmienić jego czas i współrzędne albo go usunąć.</p></section></aside>
       <section><div class="box mapbox"><manual-location-place-search id="admin-place-search"></manual-location-place-search><div class="map" id="map" aria-label="Mapa wyboru pozycji"></div><div class="caption">Kliknij mapę, aby uzupełnić współrzędne. Następnie ustaw pozycję lub dodaj punkt historii.</div><div class="map-edit-tools" id="map-edit-tools" hidden><p id="map-edit-status" role="status"></p><div class="actions"><button class="primary" id="apply-map-edit" type="submit" form="history-form">Zastosuj edycję</button><button id="cancel-map-edit" type="button">Anuluj edycję</button></div></div></div><section class="box history"><div class="history-top"><h2>Historia</h2><span class="eyebrow" id="count"></span></div><p class="sub">Od najnowszych do najstarszych. Kolory źródeł są widoczne tylko w tym panelu.</p><div class="history-legend" aria-label="Źródła historii"><span class="custom">Custom</span><span class="ha">Historia HA</span><span class="draft">Niezapisany szkic</span></div><div class="history-filters" aria-label="Widoczność historii"><label class="toggle"><input id="history-show-ha" type="checkbox" checked><span>Pokaż HA</span></label><label class="toggle"><input id="history-show-custom" type="checkbox" checked><span>Pokaż custom</span></label></div><p class="sub">Filtry zmieniają tylko listę i podgląd historii; niczego nie usuwają. Bieżący punkt, szkice, edytowany punkt i wpisy do usunięcia pozostają na liście.</p><p class="sub" id="history-visibility-status" role="status"></p><p class="sub">Custom edytujesz i usuwasz przez „Zapisz wszystkie zmiany”. Usunięcie historii HA wymaga osobnego podglądu i potwierdzenia.</p><div class="template-tools ha-history-tools" id="ha-history-tools" hidden><span id="ha-history-status" role="status"></span><button id="ha-history-reload" type="button">Odśwież historię HA</button><button id="ha-history-delete" class="danger" type="button">Usuń zaznaczone HA</button><button id="ha-history-clear" type="button">Wyczyść zaznaczenie HA</button></div><p class="sub" id="ha-history-help" hidden></p><details id="ha-delete-range-fields" hidden><summary>Usuń historię z przedziału</summary><p class="sub">Wszystkie zapisy wybranej osoby i jej przypisanego telefonu, także niewczytane na listę. Daty są lokalne, granice włączne. Domyślnie punkty Custom pozostaną. Filtry widoczności nie ograniczają usuwania, także ukrytych wpisów.</p><div class="pair" style="margin-top:12px"><div class="field"><label for="ha-delete-start">Od</label><input id="ha-delete-start" type="datetime-local" step="1"></div><div class="field"><label for="ha-delete-end">Do</label><input id="ha-delete-end" type="datetime-local" step="1"></div></div><label class="toggle field"><input id="ha-delete-custom" type="checkbox"><span>Uwzględnij również punkty customowe<small>Z historii w podanym przedziale. Bieżąca własna pozycja pozostanie aktywna.</small></span></label><button class="danger" id="ha-delete-range" type="button">Usuń wszystkie HA z przedziału</button><p class="sub">Najwyżej 31 dni w jednej operacji. Przed usunięciem zobaczysz podgląd i potwierdzisz zakres.</p></details><div class="template-tools"><span id="history-range" role="status"></span><button id="history-more" type="button">Pokaż starsze</button><button id="history-recent" type="button" hidden>Ostatnie 48 godzin</button></div><div class="template-tools"><span id="history-selection-count" role="status"></span><button id="history-template" type="button">Utwórz szablon trasy</button><button id="history-selection-clear" type="button">Wyczyść zaznaczenie</button></div><p class="sub template-hint" id="history-template-hint"></p><div class="scroll" id="history-list"></div><div id="history-editor-home"><form id="history-form" class="history-editor"><h3 id="history-edit-title" hidden>Edycja punktu</h3><div class="field"><label for="history-lat">Szerokość</label><input id="history-lat" type="number" step="any" min="-90" max="90" required></div><div class="field"><label for="history-lon">Długość</label><input id="history-lon" type="number" step="any" min="-180" max="180" required></div><div class="field timefield"><label for="history-time">Lokalna data i godzina</label><input id="history-time" type="datetime-local" step="1" required></div><label class="toggle history-current"><input id="history-current" type="checkbox"><span>Ustaw także jako bieżącą pozycję<small>Zachowa godzinę punktu. Mapy zaktualizują się po zapisaniu wszystkich zmian. Ręczna zmiana zatrzyma aktywny plan tej osoby.</small></span></label><div class="actions"><button id="add-history" type="submit">Dodaj punkt</button><button id="cancel-edit" type="button" hidden>Anuluj edycję punktu</button></div></form></div></section></section></div>
@@ -413,6 +427,13 @@ export class ManualLocationAdmin extends HTMLElement {
       const person = this._person();
       if (person) { person.enabled = false; this._changed(); }
     });
+    const returnEpoch = this._epoch;
+    for (const [id, event, action] of [["time", "input", () => this._editScheduledReturn()],
+      ["save", "click", () => this._saveScheduledReturn()], ["cancel", "click", () => this._saveScheduledReturn(true)]]) {
+      const control = this.shadowRoot.querySelector(`#scheduled-return-${id}`);
+      control.addEventListener(event, () => returnEpoch === this._epoch
+        && control === this.shadowRoot.querySelector(`#scheduled-return-${id}`) && action());
+    }
     this.shadowRoot.querySelector("#person-nickname").addEventListener("input", (event) => {
       const quick = this._snapshot.quick_save ||= { nicknames: {}, entity_id: null };
       const nickname = event.target.value.trim();
@@ -553,6 +574,85 @@ export class ManualLocationAdmin extends HTMLElement {
         ? "W szkicu wybrano źródło ręczne, ale wspólny przełącznik jest wyłączony. Ta konfiguracja używa danych Home Assistant."
         : person.enabled ? "Wybrana konfiguracja: pozycje i historia przygotowane w tym panelu."
           : "Wybrana konfiguracja: lokalizacja i historia Home Assistant. Zachowane ręczne punkty pozostają w panelu.";
+    this._refreshScheduledReturn();
+  }
+  _refreshScheduledReturn() {
+    const field = (id) => this.shadowRoot.querySelector(`#scheduled-return${id ? `-${id}` : ""}`);
+    const gateway = this._gatewayFor(this._selected);
+    if (!field("")) return;
+    field("").hidden = !gateway;
+    if (!gateway) return;
+    const record = gateway.scheduled_return, id = record?.id ?? null;
+    const zone = this._hass.config?.time_zone;
+    const validZone = !!scheduledLocalTime(0, zone);
+    const savedTime = record?.state === "armed" ? scheduledLocalTime(record.at, zone) : "";
+    if (this._scheduledReturnDraft?.entity_id !== this._selected) this._scheduledReturnDraft = null;
+    const draft = this._scheduledReturnDraft ||= { entity_id: this._selected, expected_id: id, local_time: savedTime, dirty: false };
+    if (!draft.dirty) { draft.expected_id = id; draft.local_time = savedTime; }
+    const conflict = draft.dirty && draft.expected_id !== id;
+    const reconciling = ["due", "applied"].includes(record?.state);
+    const supported = gateway.scheduled_return_supported === true;
+    const available = gateway.available === true && supported && validZone && gateway.has_custom_point === true
+      && (!record || ["idle", "armed"].includes(record.state)) && !gateway.pending && !gateway.upstream_uncertain
+      && !gateway.replay_required && !gateway.recovery_retryable;
+    const busy = this._busy || this._scenarios?.busy || !this._placeAllowed();
+    if (field("time").value !== draft.local_time) field("time").value = draft.local_time;
+    field("time").disabled = busy || !available;
+    field("zone").textContent = validZone ? `Strefa czasu Home Assistant: ${zone}` : "Nie potwierdzono strefy czasu Home Assistant.";
+    field("status").textContent = gateway.available !== true ? "Nie potwierdzono stanu terminu."
+      : !supported ? "Ta wersja bramki nie obsługuje terminu powrotu."
+      : reconciling ? gateway.gps_blocked === true ? "GPS zablokowany · trwa uzgadnianie powrotu do custom."
+        : "Trwa uzgadnianie powrotu do custom; nie potwierdzono blokady GPS."
+      : record?.state === "armed" && savedTime ? `Zapisany termin: ${savedTime.replace("T", " ")}`
+      : record && record.state !== "idle" ? "Nie potwierdzono stanu terminu." : "Brak aktywnego terminu.";
+    field("help").textContent = conflict ? "Termin zmienił się podczas edycji. Wczytaj zapisane dane przed kolejną zmianą."
+      : this._hasOtherDrafts() ? "Najpierw zapisz lub odrzuć pozostałe niezapisane zmiany."
+      : !gateway.has_custom_point ? "Najpierw zapisz własną pozycję."
+      : draft.dirty ? "Masz niezapisany termin. Użyj osobnego przycisku „Zapisz termin”."
+      : record?.state === "armed" ? "Termin przypina zapisany własny punkt. Przed jego zmianą lub uruchomieniem trasy wybierz „Anuluj termin”." : "";
+    const blocked = busy || !available || conflict || this._hasOtherDrafts();
+    field("save").disabled = blocked || !draft.dirty || !draft.local_time;
+    field("cancel").disabled = blocked || record?.state !== "armed";
+  }
+  _editScheduledReturn() {
+    const draft = this._scheduledReturnDraft;
+    if (!this._placeAllowed() || !draft || draft.entity_id !== this._selected
+      || this.shadowRoot.querySelector("#scheduled-return-time").disabled) return;
+    draft.local_time = this.shadowRoot.querySelector("#scheduled-return-time").value;
+    draft.dirty = true;
+    this._saveState();
+  }
+  async _saveScheduledReturn(cancel = false) {
+    if (!this._placeAllowed() || !this._gatewayFor(this._selected)
+      || this._scheduledReturnDraft?.entity_id !== this._selected) return false;
+    this._refreshScheduledReturn();
+    const button = this.shadowRoot.querySelector(cancel ? "#scheduled-return-cancel" : "#scheduled-return-save");
+    if (!button || button.disabled) return false;
+    const draft = this._scheduledReturnDraft;
+    const epoch = this._epoch, token = this._token, connection = this._hass.connection, entityId = this._selected;
+    const valid = () => epoch === this._epoch && token === this._token && connection === this._hass.connection
+      && entityId === this._selected && draft === this._scheduledReturnDraft;
+    draft.dirty = true;
+    this._gatewayRequest++;
+    const result = await this._admin("gateway_return", { revision: this._snapshot.revision, expected_id: draft.expected_id,
+      local_time: cancel ? null : draft.local_time });
+    if (!valid()) return false;
+    const status = result?.data, record = status?.scheduled_return;
+    if (!status?.available || !status.scheduled_return_supported || status.person_id !== entityId
+      || typeof record?.id !== "string" || !["idle", "armed", "due", "applied"].includes(record.state)
+      || (record.state === "armed" && !Number.isInteger(record.at))) {
+      const error = this.shadowRoot.querySelector("#message")?.textContent;
+      await this._pollGateway();
+      if (valid()) this._message(`${error ? `${error} ` : ""}Nie potwierdzono zmiany terminu. Sprawdź zapisany stan przed ponowną próbą.`);
+      return false;
+    }
+    this._gatewayStatus = status;
+    this._scheduledReturnDraft = null;
+    this._saveState();
+    this._message(record.state === "armed" ? "Termin powrotu zapisany."
+      : ["due", "applied"].includes(record.state) ? "Trwa uzgadnianie powrotu do custom. Sprawdź potwierdzony stan powyżej."
+      : "Brak aktywnego terminu. Anulowanie nie włącza GPS.", true);
+    return true;
   }
   _currentChanged() {
     const current = this._person()?.current;
@@ -1573,6 +1673,7 @@ export class ManualLocationAdmin extends HTMLElement {
       this._savedSnapshot = structuredClone(snapshot);
       this._sourceSnapshot = this._savedSnapshot;
       const retained = this._retained?.owner === this._hass.user.id ? this._retained : null;
+      this._scheduledReturnDraft = retained?.scheduledReturnDraft || null;
       const restoreParent = retained && (retained.dirty || retained.editing || retained.editIndex >= 0 || Object.keys(retained.removedCurrent || {}).length);
       if (restoreParent) {
         this._snapshot = retained.snapshot; this._savedSnapshot = retained.saved;
@@ -1664,13 +1765,14 @@ export class ManualLocationAdmin extends HTMLElement {
     return true;
   }
   async _reload() {
-    if (this._hasDrafts() && !window.confirm("Wczytać zapisane dane? Niezapisane pozycje, historia i szkice planów w tej karcie zostaną odrzucone.")) return;
+    if (this._hasDrafts() && !window.confirm("Wczytać zapisane dane? Niezapisane pozycje, historia, termin powrotu i szkice planów w tej karcie zostaną odrzucone.")) return;
     const result = await this._admin("admin_get");
     if (!result) return;
     this._snapshot = result.data;
     this._savedSnapshot = structuredClone(result.data);
     this._sourceSnapshot = this._savedSnapshot;
     this._gatewayNormalRequested = null;
+    this._scheduledReturnDraft = null;
     this._currentDrafts = {};
     this._removedCurrent = {};
     this._deletedHistory = {};
@@ -1687,13 +1789,13 @@ export class ManualLocationAdmin extends HTMLElement {
   }
   async _lock() {
     if (this._busy || this._scenarios?.busy) return;
-    if (this._hasDrafts() && !window.confirm("Zablokować panel i odrzucić niezapisane pozycje, historię oraz szkice planów? Zapisane dane pozostaną w HA.")) return;
+    if (this._hasDrafts() && !window.confirm("Zablokować panel i odrzucić niezapisane pozycje, historię, termin powrotu oraz szkice planów? Zapisane dane pozostaną w HA.")) return;
     const token = this._token;
     this._clearSession("Panel zablokowany.");
     if (token) { try { await callWS(this._hass, { type: "manual_location/lock", token }); } catch { /* The local token is already forgotten. */ } }
   }
   async _changePin() {
-    if (this._hasDrafts() && !window.confirm("Zmiana PIN-u zablokuje panel i odrzuci niezapisane pozycje, historię oraz szkice planów. Kontynuować?")) return;
+    if (this._hasDrafts() && !window.confirm("Zmiana PIN-u zablokuje panel i odrzuci niezapisane pozycje, historię, termin powrotu oraz szkice planów. Kontynuować?")) return;
     const input = this.shadowRoot.querySelector("#new-pin");
     const new_pin = input.value;
     input.value = "";

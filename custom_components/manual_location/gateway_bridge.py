@@ -5,6 +5,7 @@ from __future__ import annotations
 import hashlib
 import json
 import math
+import re
 import secrets
 from urllib.parse import urlsplit
 
@@ -12,6 +13,8 @@ from aiohttp import ClientTimeout
 
 from homeassistant.core import valid_entity_id
 from homeassistant.helpers.aiohttp_client import async_get_clientsession
+
+_UNSET = object()
 
 
 class GatewayError(Exception):
@@ -41,6 +44,7 @@ class GatewayBridge:
         self.session = secrets.token_urlsafe(32)
         self.ready = False
         self.pending = False
+        self.return_supported = False
 
     def invalidate(self):
         """A delayed normal grant must not survive a later close or failure."""
@@ -56,6 +60,13 @@ class GatewayBridge:
     def key(self, revision, kind, current=None):
         value = [self.entry_id, self.person_id, revision, kind, current]
         return hashlib.sha256(json.dumps(value, sort_keys=True).encode()).hexdigest()
+
+    def custom_point_digest(self, current):
+        if current is None:
+            return None
+        value = {"person_id": self.person_id, "gps_accuracy": 0,
+                 **{key: float(current[key]) or 0.0 for key in ("latitude", "longitude")}}
+        return hashlib.sha256(json.dumps(value, sort_keys=True, allow_nan=False).encode("utf-8")).hexdigest()
 
     async def _request(self, path, body=None):
         try:
@@ -110,6 +121,24 @@ class GatewayBridge:
             raise GatewayError("invalid gateway status")
         custom = self._receipt(result.get("last_custom_receipt"), "custom")
         phone = self._receipt(result.get("last_phone_receipt"), "phone")
+        supported = result.get("scheduled_return_supported", False)
+        plan = result.get("scheduled_return")
+        if type(supported) is not bool:
+            raise GatewayError("invalid scheduled return status")
+        if supported and "scheduled_return" not in result:
+            raise GatewayError("invalid scheduled return status")
+        if plan is not None:
+            if (not supported or not isinstance(plan, dict) or set(plan) != {"id", "at", "state"}
+                    or not isinstance(plan["id"], str) or not re.fullmatch(r"[A-Za-z0-9_-]{1,128}", plan["id"])
+                    or not isinstance(plan["state"], str) or plan["state"] not in {"idle", "armed", "due", "applied"}
+                    or (plan["state"] == "idle" and plan["at"] is not None)
+                    or (plan["state"] != "idle" and (type(plan["at"]) is not int or not 0 < plan["at"] <= 253402300799))):
+                raise GatewayError("invalid scheduled return status")
+            plan = dict(plan)
+        digest = result.get("custom_point_digest")
+        if digest is not None and (not isinstance(digest, str) or not re.fullmatch(r"[0-9a-f]{64}", digest)):
+            raise GatewayError("invalid custom point digest")
+        self.return_supported = self.return_supported or supported
         blocked = self.pending or result.get("upstream_uncertain") or result.get("replay_required") or result.get("recovery_retryable")
         return {"enabled": True, "available": True, "person_id": self.person_id,
                 "mode": "blocked" if blocked else result["mode"],
@@ -119,7 +148,9 @@ class GatewayBridge:
                 "upstream_uncertain": bool(result.get("upstream_uncertain")),
                 "recovery_retryable": bool(result.get("recovery_retryable")),
                 "has_custom_point": custom is not None,
-                "last_custom_receipt": custom, "last_phone_receipt": phone}
+                "last_custom_receipt": custom, "last_phone_receipt": phone,
+                "scheduled_return_supported": supported, "scheduled_return": plan,
+                "custom_point_digest": digest}
 
     async def status(self):
         return self._status(await self._request("/control/status"))
@@ -149,13 +180,40 @@ class GatewayBridge:
         self.pending = False
         self.ready = True
 
-    async def normal(self, key):
+    async def normal(self, key, *, expected_id=_UNSET):
         status = await self.status()
         if not self.ready or self.pending or status["mode"] == "blocked":
             raise GatewayError("gateway recovery pending")
+        if status["scheduled_return_supported"] and expected_id is _UNSET:
+            raise GatewayError("normal consent missing return generation")
         result = await self._request("/control/normal", {
             "idempotency_key": key, "source_session": self.session,
+            **({"expected_id": expected_id} if expected_id is not _UNSET else {}),
         })
         status = self._status(result)
         if status["mode"] not in {"warmup", "normal"}:
             raise GatewayError("normal mode unconfirmed")
+
+    async def configure_return(self, key, expected_id, at):
+        if not self.return_supported or not self.ready or self.pending:
+            raise GatewayError("scheduled return unavailable")
+        result = await self._request("/control/return", {
+            "idempotency_key": key, "source_session": self.session,
+            "expected_id": expected_id, "at": at,
+        })
+        status = self._status(result)
+        plan = status["scheduled_return"]
+        if (plan is None or plan["at"] != at
+                or plan["state"] != ("idle" if at is None else "armed")):
+            raise GatewayError("scheduled return unconfirmed")
+        return status
+
+    async def acknowledge_return(self, key, expected_id):
+        result = await self._request("/control/return/ack", {
+            "idempotency_key": key, "source_session": self.session, "expected_id": expected_id,
+        })
+        status = self._status(result)
+        plan = status["scheduled_return"]
+        if plan is None or plan["state"] != "idle" or plan["id"] == expected_id:
+            raise GatewayError("scheduled return acknowledgment unconfirmed")
+        return status

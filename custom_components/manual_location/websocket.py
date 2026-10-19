@@ -19,6 +19,7 @@ FIELDS = {
     "unlock": {"pin"},
     "admin_get": {"token"},
     "gateway_status": {"token"},
+    "gateway_return": {"token", "revision", "expected_id", "local_time"},
     "ha_history": {"token", "entity_id", "start", "end", "cursor"},
     "ha_history_preview": {"token", "entity_id", "revision", "selection"},
     "ha_history_range_preview": {"token", "entity_id", "revision", "start", "end", "include_custom"},
@@ -80,6 +81,10 @@ async def async_handle_command(hass, connection, msg):
             result = coordinator.admin_get(connection, msg["token"])
         elif operation == "gateway_status":
             result = await coordinator.async_gateway_status(connection, msg["token"])
+        elif operation == "gateway_return":
+            result = await coordinator.async_gateway_return(
+                connection, msg["token"], msg["revision"], msg["expected_id"], msg["local_time"],
+            )
         elif operation.startswith("ha_history"):
             coordinator.require_session(connection, msg["token"])
             if coordinator.gateway is None or (operation == "ha_history" and msg["entity_id"] != coordinator.gateway.person_id):
