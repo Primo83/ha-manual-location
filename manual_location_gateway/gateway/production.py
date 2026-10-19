@@ -550,7 +550,9 @@ class Runtime:
             return False
 
     async def live(self, _request):
-        return web.Response(text="ok" if self.nginx_alive() else "starting", status=200 if self.nginx_alive() else 503)
+        tasks = (self.bootstrap_task, self.cert_task, self.gateway.recovery_task)
+        healthy = self.nginx_alive() and all(task is not None and not task.done() for task in tasks)
+        return web.Response(text="ok" if healthy else "starting", status=200 if healthy else 503)
 
     async def watch_certificates(self, ssl_dir=Path("/ssl")):
         def stamp():

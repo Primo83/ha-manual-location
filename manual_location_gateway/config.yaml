@@ -1,5 +1,5 @@
 name: Manual Location Gateway
-version: "2.0.1"
+version: "2.0.2"
 slug: manual_location_gateway
 description: Bramka lokalizacji przed Home Assistant
 url: https://github.com/Primo83/ha-manual-location/tree/codex/gateway-apps

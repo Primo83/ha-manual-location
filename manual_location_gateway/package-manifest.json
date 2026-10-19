@@ -2,11 +2,11 @@
   "files": {
     "README.md": "8dbedaee46e59ef01eb1c4237ba7e02846a51f76c763e357d6c1708d3f0eac00",
     "manual_location_gateway/Dockerfile": "cdcfa21aee3b6ab378819e34d9c58e5a8111f4a02595a16e5c70c5c50878c9ea",
-    "manual_location_gateway/README.md": "a94efa785ce4a73f79d2819d6d99904a063bb3f36b0641483b16911c6ceaf16a",
-    "manual_location_gateway/config.yaml": "f49b4edf38f858fc811fc21e38c4fa173f16fd34ded3262610907894fdb4d110",
+    "manual_location_gateway/README.md": "63fb998ff9f8de1d4a7718b2ebc315b6a311f348e1374661997fee7c17ca2bc7",
+    "manual_location_gateway/config.yaml": "48188a3f9e5bdd157dbf2b433c3ed794efd78891533d951ba6554e9aa02c770d",
     "manual_location_gateway/gateway/__init__.py": "e1937f51d2f256b8d4d19e2601bb1a52543adb244393ead475bf0b4e3b164272",
     "manual_location_gateway/gateway/home_assistant.py": "4e32f9ef25440c4c39bcd93f2fa115f9aa9d6cd95a86d53780dc87bc455c012d",
-    "manual_location_gateway/gateway/production.py": "28b80da90e1d0094d300ba07e5266001acb105f79d40ec023b6f94f46b081529",
+    "manual_location_gateway/gateway/production.py": "35176c540c0529d0c3b12d2ecb24fd142667601148e32b80bc389b5710666cf9",
     "manual_location_gateway/gateway/server.py": "8aee255b42b9d47836023c43c04a1cb075a15095d9f17a42dbcd359615a423dd",
     "manual_location_gateway/requirements.lock": "3313e6151ef008e5f491dae3b0daa38ba5396f2e24ed921b2779fc0375efe954",
     "manual_location_gateway/rootfs/etc/s6-overlay/s6-rc.d/gateway/dependencies.d/init-manual-location": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
@@ -26,8 +26,8 @@
     "manual_location_gateway/rootfs/etc/s6-overlay/user-bundles.d/user/contents.d/nginx": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
     "repository.yaml": "b8ece273dd86dbc5ad7b8adc1d2cce855071e8fe5ef4477483525037008cedca"
   },
-  "package_sha256": "2add2a2ba78cde70fd909f35f6fb3fa2ef756f3c645171f701e406897b6faf9f",
+  "package_sha256": "dd24d175c7a6cae9a1e8b1f1f001a4e43542f1397f2839cbb124143b3b0231e8",
   "repository_url": "https://github.com/Primo83/ha-manual-location#codex/gateway-apps",
-  "source_commit": "7b006975877a4c3c4904e0a42d4a6b9ad2167aea",
+  "source_commit": "4b0c0a22857a4f8a0e2eaaa0ac57c9ef9e0b0ed4",
   "version": 1
 }
