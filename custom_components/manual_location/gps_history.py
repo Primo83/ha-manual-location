@@ -88,6 +88,7 @@ class GpsHistory:
         self._io_jobs = set()
         self.pending = False
         self.revision = 0
+        self.delete_epoch = 0
         self._previews = {}
 
     @property
@@ -393,6 +394,8 @@ class GpsHistory:
         return {"kind": "accepted", "ref": "accepted:" + record["id"],
                 "entity_id": next(key for key in record["snapshots"] if key.startswith("person.")),
                 "timestamp": record["point"]["timestamp"], "point": record["point"],
+                "origin": "handoff" if record["grant"] == "own_handoff" else "report",
+                "fingerprint": _digest([record["id"], record["point"], record["snapshots"]]),
                 "event_refs": GpsHistory._event_refs(record["snapshots"])}
 
     def _page(self, rows, cursor, limit, scope):
@@ -544,6 +547,34 @@ class GpsHistory:
                 raise GpsHistoryError("history_too_large")
             return self._page(rows, cursor, limit, _digest(["combined", lower, upper, rows]))
 
+    @staticmethod
+    def _snapshot_rows(records, native):
+        accepted = [GpsHistory._accepted_row(row) for row in records]
+        covered = {GpsHistory._binary_ref(ref) for row in accepted for ref in row["event_refs"]}
+        rows = accepted + [row for row in native if GpsHistory._binary_ref(row["event_refs"][0]) not in covered]
+        if len(rows) > MAX_ROWS:
+            raise GpsHistoryError("history_too_large")
+        rows.sort(key=lambda row: (_instant(row["timestamp"]), row["ref"]), reverse=True)
+        compact = tuple(_json({key: row[key] for key in (
+            "kind", "ref", "entity_id", "timestamp", "point", "origin", "fingerprint"
+        ) if key in row}).encode() for row in rows)
+        if sum(map(len, compact)) > MAX_BYTES:
+            raise GpsHistoryError("history_too_large")
+        signature = hashlib.sha256()
+        for row in compact:
+            signature.update(row)
+        return compact, signature.hexdigest()
+
+    async def async_panel_snapshot(self, start, end):
+        """Materialize once; the PIN/session owner handles the bounded RAM lifetime."""
+        lower, upper = self._range(start, end)
+        async with self._lock:
+            self._require()
+            records = await self._io(self._points, lower, upper)
+            native = await self._native_job(self._native_rows, lower, upper)
+            rows, signature = await self._io(self._snapshot_rows, records, native)
+            return rows, signature, self.revision
+
     def _selection(self, gps_ids):
         with self._database() as db:
             records = []
@@ -619,7 +650,7 @@ class GpsHistory:
             raise GpsHistoryError("history_invalid_input")
         return list(values)
 
-    async def async_preview(self, gps_ids, native_ids, current_snapshots):
+    async def async_preview(self, gps_ids, native_ids, current_snapshots, expected_fingerprints=None):
         gps_ids, native_ids = self._ids(gps_ids), self._ids(native_ids, numeric=True)
         if not gps_ids and not native_ids:
             raise GpsHistoryError("history_invalid_input")
@@ -628,6 +659,12 @@ class GpsHistory:
             self._require(mutation=True)
             records = await self._io(self._selection, gps_ids)
             rows, missing = await self._native_job(self._native_selection, records, native_ids)
+            if expected_fingerprints:
+                current_rows = {row["ref"]: row for row in rows}
+                current_rows.update((row["ref"], row) for row in map(self._accepted_row, records))
+                if any(ref not in current_rows or current_rows[ref]["fingerprint"] != fingerprint
+                       for ref, fingerprint in expected_fingerprints.items()):
+                    raise GpsHistoryError("history_changed")
             return await self._make_preview(records, rows, missing, current)
 
     async def _make_preview(self, records, rows, missing, current, *, sampled=False,
@@ -762,6 +799,7 @@ class GpsHistory:
             return None
 
     async def async_execute(self, preview_token, operation_id, *, own_plan=None, own_commit=None):
+        self.delete_epoch += 1
         if not isinstance(operation_id, str) or not 1 <= len(operation_id) <= 256:
             raise GpsHistoryError("history_invalid_input")
         if own_plan is not None and (not isinstance(own_plan, dict) or own_commit is None):
@@ -805,6 +843,7 @@ class GpsHistory:
             return json.loads(row[0]) if row[0] else None, int(row[1])
 
     async def async_recover(self, current_snapshots, *, own_commit=None):
+        self.delete_epoch += 1
         current = {self._binary_ref(ref) for ref in self._event_refs(self._snapshots(current_snapshots))}
         async with self._lock:
             if self._closing:

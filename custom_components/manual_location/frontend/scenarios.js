@@ -1,15 +1,35 @@
-import { callWS, coordinates, errorText } from "./data.js?v=2.0.4";
-import { L, makeMap, mapStyles, setMapHass } from "./map-common.js?v=2.0.4";
-import "./place-search.js?v=2.0.4";
-import "./route-import.js?v=2.0.4";
+import { callWS, coordinates, errorText } from "./data.js?v=2.1.0";
+import { L, makeMap, mapStyles, setMapHass } from "./map-common.js?v=2.1.0";
+import "./place-search.js?v=2.1.0";
+import "./route-import.js?v=2.1.0";
 
-const STATUS = { draft: "Przygotowany", running: "Uruchomiony", stopped: "Zatrzymany", completed: "Ukończony" };
+const STATUS = { draft: "Szkic", ready: "Gotowa do uruchomienia", waiting: "Oczekuje na rozpoczęcie", running: "W realizacji", stopped: "Zatrzymana", completed: "Ukończona" };
+export function scenarioStatus(plan) {
+  if (!plan) return "draft";
+  if (plan.status === "running") return plan.cursor > (plan.run_start_cursor || 0) ? "running" : "waiting";
+  if (plan.status === "stopped" || plan.status === "completed") return plan.status;
+  return plan.points?.length ? "ready" : "draft";
+}
 const REASON = { global_disabled: "Wyłączono ręczne lokalizacje.", person_missing: "Tej osoby nie ma w HA.",
   person_disabled: "Wyłączono lokalizacje tej osoby.", history_limit: "Historia osiągnęła limit 5000 punktów.",
   person_limit: "Osiągnięto limit 20 osób z ręczną lokalizacją.",
   history_conflict: "Godzina punktu koliduje z historią.", manual_change: "Ręczna zmiana zatrzymała plan.",
   user_stop: "Plan zatrzymano przyciskiem Stop.", storage_error: "Błąd zapisu zatrzymał wykonanie. Po przywróceniu zapisu uruchom plan ponownie; wykonane punkty nie zostaną zdublowane." };
+const SWITCH_REASON = {
+  normal_missed_restart: "Pominięto powrót do HA po ponownym uruchomieniu. Custom pozostaje aktywny.",
+  normal_missed_deadline: "Pominięto spóźniony powrót do HA. Custom pozostaje aktywny.",
+  normal_unconfirmed_run: "Brak potwierdzenia końca bieżącego uruchomienia. Custom pozostaje aktywny.",
+  normal_custom_conflict: "Kolejna trasa lub termin wymaga custom. Powrót do HA pominięto.",
+  normal_interrupted: "Powrót do HA przerwany. Sprawdź bieżące źródło i stan bramki.",
+  normal_unconfirmed: "Bramka nie potwierdziła powrotu do HA. Custom pozostaje wymagany.",
+  normal_cancelled: "Powrót do HA anulowany.",
+};
 const clone = (value) => structuredClone(value);
+const pointName = (value) => {
+  if (value === undefined || value === null) return "";
+  if (typeof value !== "string" || value.length > 300 || /\p{C}/u.test(value)) throw new Error("Nazwa punktu może mieć do 300 znaków, bez znaków kontrolnych.");
+  return value.trim();
+};
 const scenarioPointKey = (point) => {
   const fraction = point.timestamp.match(/\.(\d+)/)?.[1] || "";
   return JSON.stringify([Date.parse(point.timestamp), fraction.slice(3).replace(/0+$/, ""), point.latitude, point.longitude]);
@@ -85,12 +105,23 @@ export class ManualLocationScenarios extends HTMLElement {
     this._locateButton = null;
   }
   _state() { return this._context.getState(); }
+  _livePlans() { return this._state().liveScenarios || this._state().snapshot?.scenarios || {}; }
+  _protected(entityId = this._selected) {
+    const gateway = this._state().gatewayStatus;
+    return gateway?.enabled === true && gateway.person_id === entityId;
+  }
+  _startProblem(plan) {
+    if (!plan || !this._protected(plan.entity_id) || this._state().snapshot.persons[plan.entity_id]?.enabled === true) return "";
+    if (plan.auto_custom === false) return "Start jest zablokowany: aktywne jest HA, a automatyczny custom jest wyłączony. Włącz auto-custom i zapisz plan albo ręcznie włącz custom przed Start.";
+    if (plan.points[plan.cursor || 0] && Date.parse(plan.points[plan.cursor || 0].timestamp) <= Date.now()) return "Start w HA wymaga przyszłego pierwszego oczekującego punktu. Przesuń godziny i zapisz plan.";
+    return "";
+  }
   _zone() { return this._state().hass.config?.time_zone || Intl.DateTimeFormat().resolvedOptions().timeZone; }
   _draftFor(server) {
     const plan = clone(server || { entity_id: this._selected, name: "", points: [], status: "draft", cursor: 0, reason: "" });
     return { plan, signature: JSON.stringify(server || null), dirty: false, editing: false, deletedPoints: [], routeInput: {}, routeReplan: null,
       day: plan.day || scenarioLocal(plan.points[0]?.timestamp || Date.now(), this._zone()).slice(0, 10),
-      editor: { index: -1, latitude: "", longitude: "", time: "" },
+      editor: { index: -1, latitude: "", longitude: "", time: "", name: "" },
       timing: { index: plan.cursor, startTime: "", minutes: "15", targetTime: "" } };
   }
   _newDraft(entityId, dirty = false) {
@@ -151,6 +182,13 @@ export class ManualLocationScenarios extends HTMLElement {
     this._view.selectedByEntity[plan.entity_id] = id;
     this.context = this._context; this._message("");
   }
+  openPlan(id) {
+    if (!this._context || !this._state().snapshot?.scenarios?.[id] || this._busy || this._state().busy) return false;
+    this._openPlan(id);
+    if (this._planId !== id) return false;
+    this.scrollIntoView?.({ block: "start", behavior: "smooth" });
+    return true;
+  }
   _duplicate(id) {
     const state = this._state(), draft = this._context.drafts[id];
     const local = !!(draft?.dirty || draft?.editing);
@@ -163,7 +201,7 @@ export class ManualLocationScenarios extends HTMLElement {
     const suffix = " (kopia)";
     copy.day = local ? draft.day : source.day;
     copy.plan = { entity_id: source.entity_id, name: `${(source.name.trim() || "Nowy plan").slice(0, 80 - suffix.length).trimEnd()}${suffix}`,
-      day: copy.day, points: source.points.map(({ latitude, longitude, timestamp, stop }) => ({ latitude, longitude, timestamp, ...(stop ? { stop } : {}) })), ...(source.routing ? { routing: clone(source.routing) } : {}),
+      day: copy.day, points: source.points.map(({ latitude, longitude, timestamp, stop, name }) => ({ latitude, longitude, timestamp, ...(stop ? { stop } : {}), ...(name ? { name } : {}) })), ...(source.routing ? { routing: clone(source.routing) } : {}),
       status: "draft", cursor: 0, reason: "" };
     this._view.personFilter = ""; this._view.statusFilter = "";
     this._view.selectedByEntity[source.entity_id] = copyId;
@@ -238,17 +276,19 @@ export class ManualLocationScenarios extends HTMLElement {
     this._cancelLocation();
     const tail = plan.points.slice(anchorIndex + 1), stops = tail.filter((point) => point.stop);
     if (tail.length && !stops.includes(tail.at(-1))) stops.push(tail.at(-1));
-    const places = [{ latitude: anchor.latitude, longitude: anchor.longitude, label: anchor.stop || "Początek dalszej trasy" },
-      ...stops.map((point) => ({ latitude: point.latitude, longitude: point.longitude, label: point.stop || "Cel" }))];
+    const places = [{ latitude: anchor.latitude, longitude: anchor.longitude, label: anchor.stop || "Początek dalszej trasy", ...(anchor.name ? { name: anchor.name } : {}) },
+      ...stops.map((point) => ({ latitude: point.latitude, longitude: point.longitude, label: point.stop || "Cel", ...(point.stop && point.name ? { name: point.name } : {}) }))];
     if (places.length === 1) places.push({ query: "" });
     if (places.length > 12) { this._message("Dalsza trasa ma więcej niż 12 przystanków. Wybierz późniejszy punkt przebudowy."); return; }
-    this._draft.routeReplan = { planId: this._planId, entityId: this._selected, now, anchorIndex,
+    const namesRemoved = tail.some((point) => point.name && !point.stop);
+    this._draft.routeReplan = { planId: this._planId, entityId: this._selected, now, anchorIndex, namesRemoved,
       serverSignature: JSON.stringify(this._server || null), planSignature: JSON.stringify(plan) };
     this._replan = { ...this._draft.routeReplan, draft: this._draft };
     if (!importer.prepareRoute?.({ stops: places, routing: plan.routing, day,
       startTime: scenarioLocal(base, this._zone()).slice(11), replan: true, startFromNow: now })) { this._replan = null; this._draft.routeReplan = null; return; }
-    this._message(now ? "Przeliczasz od ostatniej wykonanej pozycji z czasem od teraz. Dodaj przystanki i wyznacz podgląd; Zapisz plan zatwierdzi zmiany."
-      : "Odcinek do wskazanego punktu pozostaje bez zmian. Dostosuj dalsze przystanki i wyznacz podgląd; Zapisz plan zatwierdzi zmiany.", true);
+    this._message((now ? "Przeliczasz od ostatniej wykonanej pozycji z czasem od teraz. Dodaj przystanki i wyznacz podgląd; Zapisz plan zatwierdzi zmiany."
+      : "Odcinek do wskazanego punktu pozostaje bez zmian. Dostosuj dalsze przystanki i wyznacz podgląd; Zapisz plan zatwierdzi zmiany.")
+      + (namesRemoved ? " Nazwy zwykłych pomiarów w przeliczanej części znikną; nazwy zachowanych przystanków pozostaną." : ""), true);
     importer.scrollIntoView?.({ block: "start", behavior: "smooth" }); this._buttons();
   }
   _importRoute(dto, { name = "", day, startTime, routing, startedAt }) {
@@ -269,7 +309,8 @@ export class ManualLocationScenarios extends HTMLElement {
       if (local.slice(0, 10) !== day) throw new Error("Trasa wykracza poza wybrany dzień. Wybierz wcześniejszy początek albo krótszy czas podróży.");
       scenarioUTC(day, local.slice(11), this._zone());
       if (point.stop !== undefined && (typeof point.stop !== "string" || !point.stop.trim() || point.stop.length > 300 || /\p{C}/u.test(point.stop))) throw new Error("Trasa zawiera niepoprawną nazwę przystanku.");
-      return { latitude: point.latitude, longitude: point.longitude, timestamp, ...(point.stop ? { stop: point.stop } : {}) };
+      const name = pointName(point.name);
+      return { latitude: point.latitude, longitude: point.longitude, timestamp, ...(point.stop ? { stop: point.stop } : {}), ...(name ? { name } : {}) };
     });
     if (replan) {
       const prefix = clone(this._draft.plan.points.slice(0, replan.anchorIndex + 1)), pending = points.slice(1);
@@ -280,9 +321,11 @@ export class ManualLocationScenarios extends HTMLElement {
       this._cancelLocation(); this._replan = null; this._draft.routeReplan = null;
       this.shadowRoot.querySelector("#route-import")?.resetRoute?.();
       this._draft.plan.points = merged;
+      this._draft.removedNamesWarning = replan.namesRemoved;
       if (routing) this._draft.plan.routing = clone(routing);
       this._draft.dirty = true; this._resetEditor(); this._refresh(true); this._notify();
-      this._message("Dalsza trasa przeliczona w szkicu. Zachowano wcześniejszy fragment. Sprawdź mapę i godziny, następnie Zapisz plan; działający scenariusz otrzyma zmiany dopiero po zapisie.", true);
+      this._message("Dalsza trasa przeliczona w szkicu. Zachowano wcześniejszy fragment. Sprawdź mapę i godziny, następnie Zapisz plan; działający scenariusz otrzyma zmiany dopiero po zapisie."
+        + (replan.namesRemoved ? " Nazwy zwykłych pomiarów w zastąpionej części zostaną usunięte po zapisie." : ""), true);
       return;
     }
     this._cancelLocation();
@@ -299,11 +342,56 @@ export class ManualLocationScenarios extends HTMLElement {
   _choosePlace(point) {
     if (!this._canLocate()) return false;
     this._cancelLocation();
-    this._draft.editor.latitude = point.latitude.toFixed(6); this._draft.editor.longitude = point.longitude.toFixed(6);
+    this._setPointPosition(point.latitude, point.longitude);
+    if (point.label) this._draft.editor.suggestion = { name: pointName(point.label), attribution: point.attribution || "" };
     this._draft.editing = true; this._refresh(); this._notify();
     this._map.setView([point.latitude, point.longitude], Math.max(this._map.getZoom(), 14));
     this._message("Miejsce wybrane. Sprawdź godzinę i dodaj punkt lub zastosuj edycję. Zapisz plan i Start pozostają osobnymi krokami.", true);
     return true;
+  }
+  _setPointPosition(latitude, longitude) {
+    const editor = this._draft.editor;
+    if (editor.name && (Number(editor.latitude) !== latitude || Number(editor.longitude) !== longitude)) editor.nameMoved = true;
+    delete editor.suggestion; this._nameRequest = null;
+    editor.latitude = latitude.toFixed(6); editor.longitude = longitude.toFixed(6);
+  }
+  _nameAllowed() {
+    const state = this._state(), editor = this._draft?.editor;
+    return this.isConnected && this._editable() && !!state.token && state.hass.user?.is_admin && state.hass.connected !== false
+      && editor && editor.latitude !== "" && editor.longitude !== "" && !!coordinates({ latitude: Number(editor.latitude), longitude: Number(editor.longitude) });
+  }
+  _nameCurrent(request) {
+    if (!this._nameAllowed() || this._nameRequest !== request) return false;
+    const current = this._locationStamp();
+    return Object.keys(current).every((key) => current[key] === request[key]);
+  }
+  async _suggestPointName() {
+    if (!this._nameAllowed() || this._nameRequest) return;
+    const request = this._locationStamp(), editor = this._draft.editor;
+    this._nameRequest = request; this._buttons();
+    this._message("Rozpoznawanie miejsca… Wybrane współrzędne są przesyłane do Geoapify na Twoje żądanie.");
+    try {
+      const response = await callWS(this._state().hass, { type: "manual_location/geocode_reverse", token: request.token,
+        latitude: Number(editor.latitude), longitude: Number(editor.longitude) });
+      if (!this._nameCurrent(request)) return;
+      const result = response?.results?.[0];
+      if (result?.label) {
+        editor.suggestion = { name: pointName(result.label), attribution: result.attribution || "" };
+        this._message("Sprawdź propozycję nazwy. Zastosuj ją przyciskiem lub wpisz własną.", true);
+      } else this._message("Brak jednoznacznej nazwy tego miejsca. Możesz wpisać własną nazwę albo pozostawić pole puste.", true);
+    } catch (error) {
+      if (!this._nameCurrent(request)) return;
+      if (["invalid_token", "pin_required", "unauthorized", "forbidden"].includes(error?.code)) this._context.onExpired(errorText(error), error.code);
+      else this._message(`${errorText(error)} Nazwę nadal możesz wpisać ręcznie.`);
+    } finally {
+      if (this._nameRequest === request) { this._nameRequest = null; this._refresh(); }
+    }
+  }
+  _acceptPointName() {
+    if (!this._nameAllowed() || !this._draft.editor.suggestion) return;
+    const editor = this._draft.editor;
+    editor.name = editor.suggestion.name; delete editor.suggestion; editor.nameMoved = false;
+    this._draft.editing = true; this._refresh(); this._notify();
   }
   _locationStamp() {
     const state = this._state();
@@ -323,6 +411,7 @@ export class ManualLocationScenarios extends HTMLElement {
       || (this._deviceLocationContext && !this._locationCurrent(this._deviceLocationContext))) this._cancelLocation();
   }
   _cancelLocation() {
+    this._nameRequest = null;
     this._placeSearch?.cancel?.();
     if (this._locationRequest) this._message("Pobieranie lokalizacji anulowane.");
     clearTimeout(this._locationRequest?.timer);
@@ -358,7 +447,7 @@ export class ManualLocationScenarios extends HTMLElement {
       const { latitude, longitude, accuracy } = position?.coords || {};
       if (!Number.isFinite(latitude) || Math.abs(latitude) > 90 || !Number.isFinite(longitude) || Math.abs(longitude) > 180
         || !Number.isFinite(accuracy) || accuracy < 0) { this._message("Urządzenie zwróciło nieprawidłową lokalizację. Spróbuj ponownie lub wybierz punkt na mapie."); return; }
-      this._draft.editor.latitude = latitude.toFixed(6); this._draft.editor.longitude = longitude.toFixed(6);
+      this._setPointPosition(latitude, longitude);
       this._draft.editing = true; this._refresh();
       const label = `Lokalizacja tego urządzenia · dokładność około ${Math.ceil(accuracy)} m`;
       const preview = this._deviceLocation = L.layerGroup().addTo(this._map);
@@ -384,10 +473,12 @@ export class ManualLocationScenarios extends HTMLElement {
       @media(max-width:760px){.body{grid-template-columns:1fr}.settings{border-right:0;border-bottom:1px solid var(--divider-color,#d9e2e0)}.map{height:300px}.top{padding:18px}.settings,.timeline{padding:18px}.timeline{padding-top:0}.footer{padding:18px}.row{align-items:flex-start}.row .actions{gap:5px}.row button{padding:5px 8px}.footer .actions{width:100%}#scenario-message{margin:0 18px 18px}}@media(max-width:400px){.top{flex-wrap:wrap}.map{height:270px}}
       .rows.editing{max-height:650px}.rows>#scenario-point-form{margin:0 0 12px;padding:16px;border-left:3px solid #c65d00;border-radius:7px;background:#c65d0010}.rows>#scenario-point-form .time-tools,.rows>#scenario-point-form .time-tools+.sub{display:none}.row.deleted{padding-left:10px;border-left:3px solid #b74435;background:#b7443512}.row.deleted .point-state{color:var(--error-color,#b74435);font-weight:700}
       .library{padding:22px;border-bottom:1px solid var(--divider-color,#d9e2e0)}.library-head{display:flex;align-items:center;justify-content:space-between;gap:14px}.filters{display:grid;grid-template-columns:1fr 1fr;gap:12px;margin:18px 0}.filters label{margin:0}.filters select{display:block;width:100%;margin-top:7px;min-height:42px;padding:9px 11px;font:inherit;color:inherit;background:var(--input-fill-color,var(--card-background-color,#fff));border:1px solid var(--divider-color,#c8d6d4);border-radius:7px}.plans{max-height:410px;overflow:auto}.plan-row{padding:14px 0;display:flex;align-items:center;justify-content:space-between;gap:16px;border-top:1px solid var(--divider-color,#d9e2e0)}.plan-row.selected{border-left:3px solid #176e82;padding-left:12px;background:#176e8209}.plan-row.local{border-left:3px solid #7c3aed;padding-left:12px;background:#7c3aed0b}.plan-row strong,.plan-row small{display:block;overflow-wrap:anywhere}.plan-row small{font-size:12px;line-height:1.6;margin-top:4px;color:var(--secondary-text-color,#657a82)}.plan-row .actions{flex-shrink:0}.plan-row button{min-height:34px;padding:5px 10px}.library-note{font-size:12px;line-height:1.6;color:var(--secondary-text-color,#657a82);margin:14px 0 0}@media(max-width:760px){.library{padding:18px}.plan-row{align-items:flex-start;flex-direction:column;gap:10px}.plan-row .actions{width:100%}.library-head{align-items:flex-start}.filters{gap:10px}}@media(max-width:400px){.filters{grid-template-columns:1fr}}
-      </style><section class="box" aria-label="Scenariusze tras"><div class="library"><div class="library-head"><div><div class="eyebrow">Plany i zapisane szkice</div><h2>Biblioteka tras</h2></div><button id="scenario-new">Nowy plan</button></div><div class="filters"><label for="scenario-filter-person">Osoba<select id="scenario-filter-person" aria-label="Filtr osób w bibliotece"></select></label><label for="scenario-filter-status">Status<select id="scenario-filter-status" aria-label="Filtr statusu planów"></select></label></div><div class="plans" id="scenario-library" aria-label="Lista planów i szkiców"></div><p class="library-note">Zapisane plany i szkice pozostają w HA po odświeżeniu. Fioletowe szkice mają lokalne niezapisane zmiany. Możesz zapisać wiele wariantów, ale uruchomione trasy tej samej osoby nie mogą nakładać się godzinami. Różne osoby mogą mieć trasy równocześnie.</p></div><div class="top"><div><div class="eyebrow">Plan na konkretny dzień</div><h2>Edytor trasy</h2><p class="sub" id="scenario-person"></p></div><span class="badge" id="scenario-status"></span></div><div id="scenario-message" role="status" hidden></div>
-      <manual-location-route-import id="route-import"></manual-location-route-import><div class="body"><div class="settings"><fieldset id="scenario-fields"><div class="field"><label for="scenario-name">Nazwa planu</label><input id="scenario-name" maxlength="80" placeholder="np. Popołudniowa trasa"></div><div class="field"><label for="scenario-day">Dzień trasy</label><input id="scenario-day" type="date" required><p class="sub" id="scenario-zone"></p></div><div class="field"><h3>Czas trasy</h3><div class="actions"><button id="scenario-replan-now" type="button">Przelicz od teraz</button></div><p class="sub">Dalszą drogę przez nowe przystanki możesz też zmienić przyciskiem Przelicz odtąd przy przyszłym punkcie.</p><p class="sub">Przesuwasz wybrany oczekujący punkt i wszystkie kolejne. Wykonane punkty pozostają bez zmian. Zmiany zastosujesz w HA przyciskiem Zapisz plan.</p><label for="scenario-start-time">Godzina pierwszego oczekującego punktu</label><div class="time-tools"><input id="scenario-start-time" type="time" step="1"><button id="scenario-set-start" type="button">Ustaw początek</button></div><p class="sub" id="scenario-shift-anchor"></p><label for="scenario-shift-minutes">Przesunięcie w minutach (np. 30 lub −15)</label><div class="time-tools"><input id="scenario-shift-minutes" type="number" step="1" min="-1440" max="1440"><button id="scenario-shift" type="button">Przesuń o minuty</button></div><label for="scenario-shift-time">Nowa godzina wybranego punktu</label><div class="time-tools"><input id="scenario-shift-time" type="time" step="1"><button id="scenario-shift-to" type="button">Przesuń do godziny</button></div></div><div id="scenario-point-home"><form id="scenario-point-form"><fieldset id="scenario-point-fields"><div class="field"><label for="scenario-time">Godzina punktu</label><input id="scenario-time" type="time" step="1" required><div class="time-tools"><select id="scenario-interval" aria-label="Odstęp od ostatniego punktu">${INTERVALS.map((minutes) => `<option value="${minutes}">${minutes} min</option>`).join("")}</select><button id="scenario-fill-time" type="button">Uzupełnij godzinę</button></div><p class="sub">Pierwszą godzinę wpisz ręcznie. Kolejną uzupełnisz o wybrany odstęp od ostatniego punktu planu.</p></div><div class="pair"><div class="field"><label for="scenario-lat">Szerokość</label><input id="scenario-lat" type="number" step="any" min="-90" max="90" required></div><div class="field"><label for="scenario-lon">Długość</label><input id="scenario-lon" type="number" step="any" min="-180" max="180" required></div></div><div class="actions"><button id="scenario-add" type="submit">Dodaj punkt do planu</button><button id="scenario-cancel" type="button" hidden>Anuluj edycję</button></div></fieldset></form></div></fieldset><p class="sub notice">Nowy lub zatrzymany plan uruchomisz przyciskiem Start. Zapis uruchomionej trasy zachowuje jej działanie; można zmieniać tylko oczekujące punkty z godzinami w przyszłości. HA wykonuje plan także po zamknięciu przeglądarki.</p></div>
+      .switch-option{display:flex;align-items:flex-start;gap:10px;line-height:1.5}.switch-option input{width:20px;min-height:20px;flex:0 0 20px;margin:2px 0}#scenario-source-warning{border-left:3px solid #d97706;padding:9px 12px}#scenario-switch-state{white-space:pre-line}
+      .status-legend{display:flex;flex-wrap:wrap;gap:8px;margin:14px 0}.status-legend span{font-size:12px;padding:5px 8px;border-radius:12px;border:1px solid var(--divider-color,#c8d6d4)}.badge,.status-legend span{border-left:5px solid var(--status-color,#7c3aed)}.draft,.status-draft{--status-color:#8b5cf6}.ready,.status-ready{--status-color:#3b82f6}.waiting,.status-waiting{--status-color:#d97706}.running,.status-running{--status-color:#16a34a}.stopped,.status-stopped{--status-color:#dc2626}.completed,.status-completed{--status-color:#6b7280}.plan-row{border-left:5px solid var(--status-color);padding-left:12px}.plan-row.selected{border-left:5px solid var(--status-color);outline:2px solid #176e82;outline-offset:-2px}.plan-row.local{border-left:5px solid var(--status-color)}
+      </style><section class="box" aria-label="Scenariusze tras"><div class="library"><div class="library-head"><div><div class="eyebrow">Plany i zapisane szkice</div><h2>Biblioteka tras</h2></div><button id="scenario-new">Nowy plan</button></div><div class="filters"><label for="scenario-filter-person">Osoba<select id="scenario-filter-person" aria-label="Filtr osób w bibliotece"></select></label><label for="scenario-filter-status">Status<select id="scenario-filter-status" aria-label="Filtr statusu planów"></select></label></div><div class="status-legend" aria-label="Legenda statusów tras">${Object.entries(STATUS).map(([key, label]) => `<span class="${key}">${label}</span>`).join("")}</div><div class="plans" id="scenario-library" aria-label="Lista planów i szkiców"></div><p class="library-note">Zapisane plany i szkice pozostają w HA po odświeżeniu. Kolor i nazwa wskazują stan zapisanej trasy. Napis „Niezapisane zmiany” oznacza lokalną edycję. Możesz zapisać wiele wariantów, ale uruchomione trasy tej samej osoby nie mogą nakładać się godzinami. Różne osoby mogą mieć trasy równocześnie.</p></div><div class="top"><div><div class="eyebrow">Plan na konkretny dzień</div><h2>Edytor trasy</h2><p class="sub" id="scenario-person"></p></div><span class="badge" id="scenario-status"></span></div><div id="scenario-message" role="status" hidden></div>
+      <manual-location-route-import id="route-import"></manual-location-route-import><div class="body"><div class="settings"><fieldset id="scenario-fields"><div class="field"><label for="scenario-name">Nazwa planu</label><input id="scenario-name" maxlength="80" placeholder="np. Popołudniowa trasa"></div><div class="field"><label for="scenario-day">Dzień trasy</label><input id="scenario-day" type="date" required><p class="sub" id="scenario-zone"></p></div><div class="field" id="scenario-switch-options" hidden><h3>Źródło lokalizacji podczas trasy</h3><label class="switch-option"><input id="scenario-auto-custom" type="checkbox">Automatycznie włącz custom 5 minut przed pierwszym oczekującym punktem</label><label class="switch-option"><input id="scenario-auto-ha" type="checkbox">Po potwierdzonym końcu trasy wróć do HA (GPS po 5 minutach)</label><p class="sub">Terminy powstają po Start. Sam zapis ustawień nie uruchamia trasy. Wymagany custom dla kolejnej trasy ma pierwszeństwo przed powrotem do HA.</p><p class="sub" id="scenario-source-warning" role="status" hidden></p><p class="sub" id="scenario-switch-state" role="status"></p></div><div class="field"><h3>Czas trasy</h3><div class="actions"><button id="scenario-replan-now" type="button">Przelicz od teraz</button></div><p class="sub">Dalszą drogę przez nowe przystanki możesz też zmienić przyciskiem Przelicz odtąd przy przyszłym punkcie.</p><p class="sub">Przesuwasz wybrany oczekujący punkt i wszystkie kolejne. Wykonane punkty pozostają bez zmian. Zmiany zastosujesz w HA przyciskiem Zapisz plan.</p><label for="scenario-start-time">Godzina pierwszego oczekującego punktu</label><div class="time-tools"><input id="scenario-start-time" type="time" step="1"><button id="scenario-set-start" type="button">Ustaw początek</button></div><p class="sub" id="scenario-shift-anchor"></p><label for="scenario-shift-minutes">Przesunięcie w minutach (np. 30 lub −15)</label><div class="time-tools"><input id="scenario-shift-minutes" type="number" step="1" min="-1440" max="1440"><button id="scenario-shift" type="button">Przesuń o minuty</button></div><label for="scenario-shift-time">Nowa godzina wybranego punktu</label><div class="time-tools"><input id="scenario-shift-time" type="time" step="1"><button id="scenario-shift-to" type="button">Przesuń do godziny</button></div></div><div id="scenario-point-home"><form id="scenario-point-form"><fieldset id="scenario-point-fields"><div class="field"><label for="scenario-time">Godzina punktu</label><input id="scenario-time" type="time" step="1" required><div class="time-tools"><select id="scenario-interval" aria-label="Odstęp od ostatniego punktu">${INTERVALS.map((minutes) => `<option value="${minutes}">${minutes} min</option>`).join("")}</select><button id="scenario-fill-time" type="button">Uzupełnij godzinę</button></div><p class="sub">Pierwszą godzinę wpisz ręcznie. Kolejną uzupełnisz o wybrany odstęp od ostatniego punktu planu.</p></div><div class="field"><label for="scenario-point-name">Nazwa punktu (opcjonalnie)</label><input id="scenario-point-name" maxlength="300" placeholder="np. Dom, spotkanie, parking"><p class="sub" id="scenario-name-moved" hidden>Miejsce się zmieniło. Sprawdź, czy własna nazwa nadal pasuje.</p><p class="sub" id="scenario-name-proposal" hidden></p><div class="actions"><button id="scenario-name-accept" type="button" hidden>Użyj propozycji nazwy</button><button id="scenario-name-dismiss" type="button" hidden>Pomiń propozycję</button><button id="scenario-name-lookup" type="button">Zaproponuj nazwę miejsca</button></div><p class="sub">Przycisk wysyła wybrane współrzędne do Geoapify. Korzysta ze wspólnego limitu wyszukiwania. Nazwa jest opcjonalna.</p></div><div class="pair"><div class="field"><label for="scenario-lat">Szerokość</label><input id="scenario-lat" type="number" step="any" min="-90" max="90" required></div><div class="field"><label for="scenario-lon">Długość</label><input id="scenario-lon" type="number" step="any" min="-180" max="180" required></div></div><div class="actions"><button id="scenario-add" type="submit">Dodaj punkt do planu</button><button id="scenario-cancel" type="button" hidden>Anuluj edycję</button></div></fieldset></form></div></fieldset><p class="sub notice">Nowy lub zatrzymany plan uruchomisz przyciskiem Start. Zapis uruchomionej trasy zachowuje jej działanie; można zmieniać tylko oczekujące punkty z godzinami w przyszłości. HA wykonuje plan także po zamknięciu przeglądarki.</p></div>
       <div><manual-location-place-search id="route-place-search"></manual-location-place-search><div class="caption" id="route-map-pick-controls" hidden><p id="route-map-pick-status" role="status"></p><button id="route-map-pick-cancel" type="button">Anuluj wskazywanie</button></div><div class="map" id="scenario-map" aria-label="Podgląd całej zaplanowanej trasy"></div><div class="caption">Kliknij mapę, aby wybrać lub przesunąć edytowany punkt. Cała trasa jest widoczna wyłącznie w tym podglądzie administratora.</div></div></div>
-      <div class="timeline"><div class="timeline-head"><h3>Punkty po kolei</h3><span class="save-state" id="scenario-count"></span></div><div class="rows" id="scenario-list"></div><p class="sub" id="scenario-reason"></p><p class="sub">Stop pozostaje aktywny po restarcie. Ręczna zmiana pozycji, historii lub ustawień osoby także zatrzymuje jej plan. Ponowne włączenie lokalizacji nie uruchamia planu.</p></div>
+      <div class="timeline"><div class="timeline-head"><h3>Punkty po kolei</h3><span class="save-state" id="scenario-count"></span></div><div class="rows" id="scenario-list"></div><p class="sub" id="scenario-reason"></p><p class="sub">Stop pozostaje aktywny po restarcie. Ręczna zmiana pozycji lub historii zatrzymuje trasę w realizacji. Oczekujące trasy pozostają zaplanowane. Ponowne włączenie lokalizacji nie uruchamia planu.</p></div>
       <div class="footer"><span class="save-state" id="scenario-save-state"></span><div class="actions"><button class="primary" id="scenario-save">Zapisz plan</button><button id="scenario-start">Start</button><button id="scenario-stop">Stop</button><button class="danger" id="scenario-delete">Usuń plan</button><button id="scenario-discard">Odrzuć szkic planu</button></div></div></section>`;
     mapStyles(this.shadowRoot);
     this._map = makeMap(this.shadowRoot.querySelector("#scenario-map"), this._state().hass);
@@ -408,7 +499,7 @@ export class ManualLocationScenarios extends HTMLElement {
       if (this.shadowRoot.querySelector("#route-import")?.chooseMapPoint?.({ latitude: latlng.lat, longitude: latlng.lng })) return;
       if (!this._editable()) return;
       this._cancelLocation();
-      this._draft.editor.latitude = latlng.lat.toFixed(6); this._draft.editor.longitude = latlng.lng.toFixed(6);
+      this._setPointPosition(latlng.lat, latlng.lng);
       this._draft.editing = true; this._refresh(); this._notify();
       this._message("Miejsce wybrane. Uzupełnij godzinę i dodaj punkt albo zastosuj edycję.", true);
     });
@@ -418,6 +509,13 @@ export class ManualLocationScenarios extends HTMLElement {
       this._cancelLocation();
       this._draft.plan.name = event.target.value; this._draft.dirty = true; this._buttons(); this._notify();
     });
+    for (const [id, key] of [["scenario-auto-custom", "auto_custom"], ["scenario-auto-ha", "auto_ha"]]) {
+      this.shadowRoot.querySelector("#" + id).addEventListener("change", (event) => {
+        if (!this._editable() || !this._protected()) return;
+        this._cancelLocation(); this._draft.plan[key] = event.target.checked === true;
+        this._draft.dirty = true; this._buttons(); this._notify();
+      });
+    }
     this.shadowRoot.querySelector("#scenario-day").addEventListener("input", () => this._cancelLocation());
     this.shadowRoot.querySelector("#scenario-day").addEventListener("change", () => this._changeDay());
     this.shadowRoot.querySelector("#scenario-interval").addEventListener("change", (event) => { this._view.intervalMinutes = Number(event.target.value); });
@@ -431,12 +529,18 @@ export class ManualLocationScenarios extends HTMLElement {
     this.shadowRoot.querySelector("#scenario-replan-now").addEventListener("click", () => this._beginReplan());
     this.shadowRoot.querySelector("#scenario-shift").addEventListener("click", () => this._shiftMinutes());
     this.shadowRoot.querySelector("#scenario-shift-to").addEventListener("click", () => this._shiftTo(this._draft.timing.index, this._draft.timing.targetTime));
-    for (const [id, key] of [["scenario-lat", "latitude"], ["scenario-lon", "longitude"], ["scenario-time", "time"]]) {
+    for (const [id, key] of [["scenario-lat", "latitude"], ["scenario-lon", "longitude"], ["scenario-time", "time"], ["scenario-point-name", "name"]]) {
       this.shadowRoot.querySelector(`#${id}`).addEventListener("input", (event) => {
         this._cancelLocation();
+        if (["latitude", "longitude"].includes(key)) { delete this._draft.editor.suggestion; this._draft.editor.nameMoved = !!this._draft.editor.name; }
+        if (key === "name") { delete this._draft.editor.suggestion; this._draft.editor.nameMoved = false; }
+        this._nameRequest = null;
         this._draft.editor[key] = event.target.value; this._draft.editing = true; this._draw(); this._buttons(); this._notify();
       });
     }
+    this.shadowRoot.querySelector("#scenario-name-lookup").addEventListener("click", () => this._suggestPointName());
+    this.shadowRoot.querySelector("#scenario-name-accept").addEventListener("click", () => this._acceptPointName());
+    this.shadowRoot.querySelector("#scenario-name-dismiss").addEventListener("click", () => { delete this._draft.editor.suggestion; this._buttons(); });
     this.shadowRoot.querySelector("#scenario-point-form").addEventListener("submit", (event) => { event.preventDefault(); this._add(); });
     this.shadowRoot.querySelector("#scenario-cancel").addEventListener("click", () => this._cancel());
     this.shadowRoot.querySelector("#scenario-save").addEventListener("click", () => this._save());
@@ -456,7 +560,7 @@ export class ManualLocationScenarios extends HTMLElement {
     const state = this._state();
     this.shadowRoot.querySelector("#scenario-person").textContent = state.hass.states[this._selected]?.attributes.friendly_name || this._selected || "Wybierz osobę w ustawieniach powyżej.";
     this.shadowRoot.querySelector("#scenario-zone").textContent = `Godziny według Home Assistant: ${this._zone()}. Jeden dzień, bez powtarzania.`;
-    for (const [id, value] of [["scenario-name", plan.name], ["scenario-day", day], ["scenario-lat", editor.latitude], ["scenario-lon", editor.longitude], ["scenario-time", editor.time]]) {
+    for (const [id, value] of [["scenario-name", plan.name], ["scenario-day", day], ["scenario-lat", editor.latitude], ["scenario-lon", editor.longitude], ["scenario-time", editor.time], ["scenario-point-name", editor.name || ""]]) {
       const input = this.shadowRoot.querySelector("#" + id);
       if (input.value !== String(value) && (this._renderedEditor !== editor || this.shadowRoot.activeElement !== input)) input.value = value;
     }
@@ -470,12 +574,13 @@ export class ManualLocationScenarios extends HTMLElement {
     for (const [id, value] of [["scenario-start-time", timing.startTime], ["scenario-shift-minutes", timing.minutes], ["scenario-shift-time", timing.targetTime]]) this.shadowRoot.querySelector("#" + id).value = value;
     this.shadowRoot.querySelector("#scenario-shift-anchor").textContent = anchor ? "Przesuwanie od punktu " + (timing.index + 1) + " · " + scenarioLocal(anchor.timestamp, this._zone()).slice(11) + ". Wybierz inny przyciskiem „Przesuń odtąd” na liście." : "Dodaj oczekujące punkty, aby ustawić czas trasy.";
     const status = this.shadowRoot.querySelector("#scenario-status");
-    status.textContent = this._draft.dirty ? "Niezapisany szkic" : STATUS[this._server?.status || "draft"];
-    status.className = `badge ${this._server?.status || "draft"}`;
-    this.shadowRoot.querySelector("#scenario-reason").textContent = REASON[this._server?.reason] || (this._server?.reason ? `Plan zatrzymany: ${this._server.reason}` : "");
+    const live = this._livePlans()[this._planId] || this._server, displayStatus = scenarioStatus(live);
+    status.textContent = STATUS[displayStatus] + (this._draft.dirty || this._draft.editing ? " · Niezapisane zmiany" : "");
+    status.className = `badge ${displayStatus}`;
+    this.shadowRoot.querySelector("#scenario-reason").textContent = REASON[live?.reason] || (live?.reason ? `Plan zatrzymany: ${live.reason}` : "");
     const liveKeys = new Set(plan.points.map(scenarioPointKey));
     const deleted = this._draft.deletedPoints.filter((point) => !liveKeys.has(scenarioPointKey(point)));
-    this.shadowRoot.querySelector("#scenario-count").textContent = (this._server?.cursor || 0) + " wykonano / " + plan.points.length + " punktów" + (deleted.length ? " · " + deleted.length + " do usunięcia" : "");
+    this.shadowRoot.querySelector("#scenario-count").textContent = (live?.cursor || 0) + " wykonano / " + (live?.points.length ?? plan.points.length) + " zapisanych punktów" + (deleted.length ? " · " + deleted.length + " do usunięcia" : "");
     const list = this.shadowRoot.querySelector("#scenario-list"), form = this.shadowRoot.querySelector("#scenario-point-form");
     const home = this.shadowRoot.querySelector("#scenario-point-home"), editing = editor.index >= 0 && !!plan.points[editor.index];
     if (form.parentElement !== (editing ? list : home)) (editing ? list : home).append(form);
@@ -494,7 +599,7 @@ export class ManualLocationScenarios extends HTMLElement {
       time.dateTime = point.timestamp; time.textContent = scenarioLocal(point.timestamp, this._zone()).slice(11);
       badge.className = "point-state"; badge.textContent = deleted ? "Do usunięcia po zapisie" : (point.stop ? "Przystanek · " : "Pomiar · ") + (done ? "Wykonano" : "Oczekuje");
       coords.textContent = point.latitude.toFixed(5) + ", " + point.longitude.toFixed(5); info.append(time, badge, coords);
-      if (point.stop) { const name = document.createElement("strong"); name.textContent = point.stop; info.append(name); }
+      if (point.name || point.stop) { const name = document.createElement("strong"); name.textContent = point.name || point.stop; info.append(name); }
       const actions = document.createElement("div"); actions.className = "actions";
       if (!deleted) for (const [label, handler] of [["Edytuj", () => this._edit(index)], ["Usuń", () => this._remove(index)], ["Przesuń odtąd", () => this._selectShift(index)], ["Przelicz odtąd", () => this._beginReplan(index)]]) {
         const button = document.createElement("button"); button.textContent = label; button.disabled = done || !this._editable() || (["Przesuń odtąd", "Przelicz odtąd"].includes(label) && this._draft.editing)
@@ -529,7 +634,7 @@ export class ManualLocationScenarios extends HTMLElement {
       ...[...entries.values()].map((plan) => plan.entity_id)]);
     const personOptions = [["", "Wszystkie osoby"], ...[...personIds].map((id) => [id, personName(id)])];
     const statusOptions = [["", "Wszystkie statusy"], ["local", "Niezapisane zmiany"],
-      ...Object.entries(STATUS).map(([key, label]) => [key, key === "draft" ? "Szkice i przygotowane" : label])];
+      ...Object.entries(STATUS)];
     personFilter.replaceChildren(); statusFilter.replaceChildren();
     for (const [value, label] of personOptions) {
       const option = document.createElement("option"); option.value = value; option.textContent = label; personFilter.append(option);
@@ -540,25 +645,29 @@ export class ManualLocationScenarios extends HTMLElement {
     personFilter.value = this._view.personFilter; statusFilter.value = this._view.statusFilter;
     const list = this.shadowRoot.querySelector("#scenario-library"); list.replaceChildren();
     for (const [id, plan] of entries) {
-      const server = plans[id], draft = this._context.drafts[id];
-      const local = !!(draft?.dirty || draft?.editing || draft?.routeInput?.dirty || draft?.routeReplan), status = server?.status || "draft";
+      const server = plans[id], live = this._livePlans()[id] || server, draft = this._context.drafts[id];
+      const local = !!(draft?.dirty || draft?.editing || draft?.routeInput?.dirty || draft?.routeReplan), status = scenarioStatus(live);
       if (this._view.personFilter && this._view.personFilter !== plan.entity_id) continue;
       if (this._view.statusFilter && (this._view.statusFilter === "local" ? !local : status !== this._view.statusFilter)) continue;
-      const row = document.createElement("div"); row.className = `plan-row${id === this._planId ? " selected" : ""}${local ? " local" : ""}`;
+      const row = document.createElement("div"); row.className = `plan-row status-${status}${id === this._planId ? " selected" : ""}${local ? " local" : ""}`;
       row.setAttribute("data-scenario-id", id);
       const info = document.createElement("div"), name = document.createElement("strong"), detail = document.createElement("small"), progress = document.createElement("small");
       name.textContent = plan.name || "Nowy szkic bez nazwy";
       const day = local ? draft.day : plan.day;
       const times = plan.points.length ? `${scenarioLocal(plan.points[0].timestamp, this._zone()).slice(11)}–${scenarioLocal(plan.points.at(-1).timestamp, this._zone()).slice(11)}` : "bez punktów";
       detail.textContent = `${personName(plan.entity_id)} · ${day} · ${times}`;
-      progress.textContent = `${local ? "Niezapisane zmiany · " : ""}${server ? (!plan.points.length && status === "draft" ? "Zapisany szkic" : STATUS[status]) : "Szkic tylko w tej karcie"} · ${server?.cursor || 0}/${plan.points.length} punktów wykonano`;
+      progress.textContent = `${local ? "Niezapisane zmiany · " : ""}${live ? (!live.points.length && status === "draft" ? "Zapisany szkic" : STATUS[status]) : "Szkic tylko w tej karcie"} · ${live?.cursor || 0}/${live?.points.length ?? plan.points.length} punktów wykonano`;
       info.append(name, detail, progress);
+      const startProblem = this._startProblem(server);
+      if (startProblem && server?.status !== "running") { const warning = document.createElement("small"); warning.textContent = startProblem; info.append(warning); }
+      const switchReason = SWITCH_REASON[live?.switch_state?.reason];
+      if (switchReason) { const reason = document.createElement("small"); reason.textContent = switchReason; info.append(reason); }
       const actions = document.createElement("div"); actions.className = "actions";
       const blocked = this._busy || state.busy || state.parentDirty || !state.token;
       const localDeleteBlocked = blocked || this.busy || !this.isConnected || !state.hass.user?.is_admin || state.hass.connected === false;
       for (const [label, action, disabled] of [["Otwórz", "open", this._busy || state.busy],
-        ["Start", "start", blocked || local || !server || status === "running" || server.cursor >= server.points.length || !state.snapshot.enabled || state.snapshot.persons[plan.entity_id]?.enabled === false || !state.hass.states[plan.entity_id]],
-        ["Stop", "stop", blocked || status !== "running"], ["Usuń", "delete", server ? blocked || status === "running" : localDeleteBlocked],
+        ["Start", "start", blocked || local || !server || live?.status === "running" || server.cursor >= server.points.length || !state.snapshot.enabled || (this._protected(plan.entity_id) ? !!this._startProblem(server) : state.snapshot.persons[plan.entity_id]?.enabled === false) || !state.hass.states[plan.entity_id]],
+        ["Stop", "stop", blocked || live?.status !== "running"], ["Usuń", "delete", server ? blocked || live?.status === "running" : localDeleteBlocked],
         ["Duplikuj", "duplicate", this._busy || state.busy || !state.token || !state.hass.user?.is_admin || state.hass.connected === false || !state.hass.states[plan.entity_id]]]) {
         const button = document.createElement("button"); button.textContent = label; button.disabled = !!disabled;
         button.setAttribute("aria-label", `${label} plan ${plan.name || "bez nazwy"} osoby ${personName(plan.entity_id)}`);
@@ -578,6 +687,31 @@ export class ManualLocationScenarios extends HTMLElement {
     this._syncLocation();
     this._syncPlaceSearch();
     this._syncRouteImport();
+    const live = this._livePlans()[this._planId] || this._server, plan = this._draft.plan, protectedPerson = this._protected();
+    this.shadowRoot.querySelector("#scenario-switch-options").hidden = !protectedPerson;
+    this.shadowRoot.querySelector("#scenario-auto-custom").checked = plan.auto_custom !== false;
+    this.shadowRoot.querySelector("#scenario-auto-ha").checked = plan.auto_ha === true;
+    const requiresManual = live?.status === "running" && live.auto_custom === false && this._state().snapshot.persons[this._selected]?.enabled !== true;
+    const nextPoint = live?.points?.[live.cursor || 0];
+    const sourceWarning = requiresManual ? `Wymaga ręcznego custom przed ${nextPoint ? scenarioLocal(nextPoint.timestamp, this._zone()).replace("T", " ") : "następnym punktem"}. Bez niego zostanie zatrzymana tylko ta trasa.` : this._startProblem(plan);
+    this.shadowRoot.querySelector("#scenario-source-warning").textContent = sourceWarning;
+    this.shadowRoot.querySelector("#scenario-source-warning").hidden = !sourceWarning;
+    const switchState = live?.switch_state, switchInfo = [];
+    if (switchState?.custom === "pending") switchInfo.push("Auto-custom: oczekuje na termin przygotowania trasy.");
+    else if (switchState?.custom === "done") switchInfo.push("Auto-custom: wykonano przygotowanie tego uruchomienia.");
+    if (switchState?.normal === "pending") switchInfo.push("Powrót do HA: oczekuje na potwierdzone zakończenie trasy.");
+    else if (switchState?.normal === "started") switchInfo.push("Powrót do HA rozpoczęty; bramka odlicza 5 minut przed dopuszczeniem GPS.");
+    else if (switchState?.normal === "done") switchInfo.push("Powrót do HA zakończony. Bieżący stan GPS sprawdzisz w ustawieniach osoby.");
+    if (switchState?.reason) switchInfo.push(SWITCH_REASON[switchState.reason] || "Przełączenie nie zostało wykonane. Sprawdź stan bramki i terminy.");
+    this.shadowRoot.querySelector("#scenario-switch-state").textContent = switchInfo.join("\n");
+    const editor = this._draft.editor, proposal = editor.suggestion;
+    this.shadowRoot.querySelector("#scenario-name-lookup").disabled = !this._nameAllowed() || !!this._nameRequest;
+    this.shadowRoot.querySelector("#scenario-name-proposal").hidden = !proposal;
+    this.shadowRoot.querySelector("#scenario-name-proposal").textContent = proposal ? `Propozycja: ${proposal.name}${proposal.attribution ? " · " + proposal.attribution : ""}` : "";
+    this.shadowRoot.querySelector("#scenario-name-accept").hidden = !proposal;
+    this.shadowRoot.querySelector("#scenario-name-accept").disabled = !this._nameAllowed();
+    this.shadowRoot.querySelector("#scenario-name-dismiss").hidden = !proposal;
+    this.shadowRoot.querySelector("#scenario-name-moved").hidden = !editor.nameMoved;
     const state = this._state(), running = this._server?.status === "running", busy = this._busy || state.busy;
     const blocked = busy || state.parentDirty || !state.token || !this._selected;
     this.shadowRoot.querySelector("#scenario-fields").disabled = !this._editable();
@@ -591,7 +725,7 @@ export class ManualLocationScenarios extends HTMLElement {
     const timeBlocked = !this._editable() || this._draft.editing || (this._server?.cursor || 0) >= this._draft.plan.points.length;
     for (const id of ["scenario-start-time", "scenario-set-start", "scenario-shift-minutes", "scenario-shift", "scenario-shift-time", "scenario-shift-to"]) this.shadowRoot.querySelector("#" + id).disabled = timeBlocked;
     this.shadowRoot.querySelector("#scenario-save").disabled = blocked || this._hasPlanConflict() || !this._draft.dirty || this._draft.editing;
-    this.shadowRoot.querySelector("#scenario-start").disabled = blocked || running || !this._server || this._draft.dirty || this._draft.editing || this._server.cursor >= this._server.points.length || !state.snapshot.enabled || state.snapshot.persons[this._selected]?.enabled === false || !state.hass.states[this._selected];
+    this.shadowRoot.querySelector("#scenario-start").disabled = blocked || running || !this._server || this._draft.dirty || this._draft.editing || this._server.cursor >= this._server.points.length || !state.snapshot.enabled || (protectedPerson ? !!this._startProblem(this._server) : state.snapshot.persons[this._selected]?.enabled === false) || !state.hass.states[this._selected];
     this.shadowRoot.querySelector("#scenario-stop").disabled = blocked || !running;
     this.shadowRoot.querySelector("#scenario-delete").disabled = blocked || !this._server || running;
     this.shadowRoot.querySelector("#scenario-discard").disabled = busy || (!this._draft.dirty && !this._draft.editing && !this._draft.routeInput?.dirty && !this._draft.routeReplan);
@@ -608,7 +742,7 @@ export class ManualLocationScenarios extends HTMLElement {
     const path = this._draft.plan.points.map((point) => [point.latitude, point.longitude]);
     if (path.length > 1) L.polyline(path, { color: "#176e82", weight: 3, opacity: .7 }).addTo(this._layers);
     this._draft.plan.points.forEach((point, index) => {
-      const label = document.createElement("span"); label.textContent = `${point.stop ? point.stop + " · " : ""}${scenarioLocal(point.timestamp, this._zone()).slice(11)} · ${index < (this._server?.cursor || 0) ? "Wykonano" : "Oczekuje"}`;
+      const label = document.createElement("span"); label.textContent = `${point.name || point.stop ? (point.name || point.stop) + " · " : ""}${scenarioLocal(point.timestamp, this._zone()).slice(11)} · ${index < (this._server?.cursor || 0) ? "Wykonano" : "Oczekuje"}`;
       L.circleMarker([point.latitude, point.longitude], { radius: point.stop ? 9 : 5, weight: point.stop ? 3 : 1, color: index < (this._server?.cursor || 0) ? "#657a82" : "#176e82", fillOpacity: 1 }).bindTooltip(label).addTo(this._layers);
     });
     const editor = this._draft.editor;
@@ -666,7 +800,8 @@ export class ManualLocationScenarios extends HTMLElement {
       if (points.some((point) => Date.parse(point.timestamp) === Date.parse(timestamp))) throw new Error("Istnieje już punkt o tej godzinie.");
       if (this._server?.status === "running" && Date.parse(timestamp) <= Date.now()) throw new Error("Oczekujący punkt uruchomionej trasy musi mieć godzinę w przyszłości.");
       if (points.length >= 500) throw new Error("Jeden plan może zawierać maksymalnie 500 punktów.");
-      points.push({ ...position, timestamp, ...(prior?.stop ? { stop: prior.stop } : {}) }); points.sort((a, b) => Date.parse(a.timestamp) - Date.parse(b.timestamp));
+      const name = pointName(editor.name);
+      points.push({ ...position, timestamp, ...(prior?.stop ? { stop: prior.stop } : {}), ...(name ? { name } : {}) }); points.sort((a, b) => Date.parse(a.timestamp) - Date.parse(b.timestamp));
       plan.points = points; this._draft.dirty = true; this._resetEditor(); this._refresh(true); this._notify();
       this._message("Punkt przygotowany. Zapisz plan, aby zachować trasę w HA.", true);
     } catch (error) { this._message(error.message); }
@@ -724,14 +859,14 @@ export class ManualLocationScenarios extends HTMLElement {
       this._message(`Godzina uzupełniona: ${time}, ${minutes} min po ostatnim punkcie. Sprawdź miejsce i kliknij „Dodaj punkt do planu”.`, true);
     } catch (error) { this._message(error.message); }
   }
-  _resetEditor() { this._cancelLocation(); this._draft.editor = { index: -1, latitude: "", longitude: "", time: "" }; this._draft.editing = false; }
+  _resetEditor() { this._cancelLocation(); this._draft.editor = { index: -1, latitude: "", longitude: "", time: "", name: "" }; this._draft.editing = false; }
   _cancel() { if (this._busy) return; this._resetEditor(); this._refresh(); this._notify(); this._message("Edycja punktu anulowana.", true); }
   _edit(index) {
     if (!this._editable() || !Number.isInteger(index) || index < (this._server?.cursor || 0) || !this._draft.plan.points[index]) return;
     if (this._draft.editing && !window.confirm("Odrzucić bieżący niezastosowany punkt i edytować wybrany? Pozostałe punkty planu pozostaną.")) return;
     this._cancelLocation();
     const point = this._draft.plan.points[index];
-    this._draft.editor = { index, latitude: String(point.latitude), longitude: String(point.longitude), time: scenarioLocal(point.timestamp, this._zone()).slice(11) };
+    this._draft.editor = { index, latitude: String(point.latitude), longitude: String(point.longitude), time: scenarioLocal(point.timestamp, this._zone()).slice(11), name: point.name || "" };
     this._draft.editing = true; this._refresh(); this._notify(); this._map.setView([point.latitude, point.longitude], Math.max(this._map.getZoom(), 14));
     this.shadowRoot.querySelector("#scenario-point-form").scrollIntoView?.({ block: "center", behavior: "smooth" });
     this.shadowRoot.querySelector("#scenario-time").focus?.({ preventScroll: true });
@@ -741,7 +876,7 @@ export class ManualLocationScenarios extends HTMLElement {
     if (this._server?.status === "running" && this._draft.plan.points.length - (this._server.cursor || 0) <= 1) {
       this._message("Uruchomiona trasa musi mieć oczekujący punkt. Zatrzymaj plan przed usunięciem ostatniego punktu."); return;
     }
-    const { latitude, longitude, timestamp, stop } = this._draft.plan.points[index], removed = { latitude, longitude, timestamp, ...(stop ? { stop } : {}) };
+    const { latitude, longitude, timestamp, stop, name } = this._draft.plan.points[index], removed = { latitude, longitude, timestamp, ...(stop ? { stop } : {}), ...(name ? { name } : {}) };
     if (!this._draft.deletedPoints.some((point) => scenarioPointKey(point) === scenarioPointKey(removed))) this._draft.deletedPoints.push(removed);
     this._cancelLocation();
     this._draft.plan.points.splice(index, 1); this._draft.dirty = true;
@@ -765,11 +900,14 @@ export class ManualLocationScenarios extends HTMLElement {
       if (pending.some((point) => Date.parse(point.timestamp) <= Date.now())) { this._message("Oczekujące punkty uruchomionej trasy muszą mieć godziny w przyszłości. Przesuń je albo zatrzymaj plan."); return; }
     }
     if (!this._draft.plan.name.trim() || this._draft.plan.name.trim().length > 80) { this._message("Wpisz nazwę planu (1–80 znaków). Szkic może nie mieć jeszcze punktów."); return; }
-    await this._mutate("scenario_save", { scenario_id: this._server ? this._planId : null,
-      entity_id: this._selected, day: this._draft.day, name: this._draft.plan.name.trim(), points: clone(this._draft.plan.points), routing: clone(this._draft.plan.routing || null) }, true);
+    if (this._draft.removedNamesWarning && !window.confirm("Przeliczenie zastąpiło zwykłe pomiary w dalszej części; ich nazwy zostaną usunięte. Nazwy zachowanych przystanków pozostaną. Zapisać plan?")) return;
+    await this._mutate("scenario_save", { point_names_version: 1, scenario_id: this._server ? this._planId : null,
+      entity_id: this._selected, day: this._draft.day, name: this._draft.plan.name.trim(), points: clone(this._draft.plan.points), routing: clone(this._draft.plan.routing || null),
+      ...(this._protected() ? { auto_custom: this._draft.plan.auto_custom !== false, auto_ha: this._draft.plan.auto_ha === true } : {}) }, true);
   }
   async _action(action, id = this._planId) {
     const draft = this._context.drafts[id], server = this._state().snapshot.scenarios[id];
+    if (action === "start" && this._startProblem(server)) { this._message(this._startProblem(server)); return; }
     if (action === "start" && (draft?.dirty || draft?.editing)) { this._message("Najpierw zapisz plan lub odrzuć szkic. Start uruchamia plan zapisany w HA."); return; }
     if (!server) {
       const state = this._state();

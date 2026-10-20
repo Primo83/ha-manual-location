@@ -1,7 +1,7 @@
 {
   "domain": "manual_location",
   "name": "Manual Location",
-  "version": "2.0.4",
+  "version": "2.1.0",
   "codeowners": ["@Primo83"],
   "config_flow": true,
   "dependencies": ["frontend", "websocket_api"],

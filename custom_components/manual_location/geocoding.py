@@ -22,6 +22,7 @@ API_KEY_OPTION = "geoapify_api_key"
 USAGE_STORAGE_KEY = f"{DOMAIN}_geocoding"
 USAGE_INITIALIZED = "geocoding_storage_initialized"
 ENDPOINT = "https://api.geoapify.com/v1/geocode/search"
+REVERSE_ENDPOINT = "https://api.geoapify.com/v1/geocode/reverse"
 DAILY_LIMIT = 2500
 MAX_BODY_BYTES = 256 * 1024
 CACHE_SECONDS = 3600
@@ -196,9 +197,11 @@ class PlaceGeocoder:
     async def _request(self, query, key):
         try:
             session = async_get_clientsession(self.hass)
+            reverse = isinstance(query, tuple)
+            params = {"lang": "pl", "limit": 5, "format": "json", "apiKey": key}
+            params.update({"lat": query[0], "lon": query[1]} if reverse else {"text": query, "bias": "countrycode:pl"})
             async with session.get(
-                ENDPOINT,
-                params={"text": query, "lang": "pl", "limit": 5, "format": "json", "bias": "countrycode:pl", "apiKey": key},
+                REVERSE_ENDPOINT if reverse else ENDPOINT, params=params,
                 timeout=ClientTimeout(total=12), allow_redirects=False,
             ) as response:
                 if response.status in {401, 403}:
@@ -212,7 +215,11 @@ class PlaceGeocoder:
                     body.extend(chunk)
                     if len(body) > MAX_BODY_BYTES:
                         raise LocationError("geocoder_unavailable")
-                return _results(json.loads(body), key)
+                payload = json.loads(body)
+                if reverse and isinstance(payload, dict) and isinstance(payload.get("results"), list):
+                    # A nearby town/POI is not evidence that this point is that place.
+                    payload["results"] = [item for item in payload["results"] if self._precise_reverse(item)]
+                return _results(payload, key)
         except LocationError:
             raise
         except Exception:
@@ -220,9 +227,27 @@ class PlaceGeocoder:
             raise LocationError("geocoder_unavailable") from None
 
     async def async_search(self, query, *, authorize=None):
+        return await self._lookup(normalize_query(query), authorize=authorize)
+
+    async def async_reverse(self, latitude, longitude, *, authorize=None):
+        """Suggest a name only after an explicit administrator request."""
+        if any(type(value) not in (int, float) or not math.isfinite(value) or abs(value) > bound
+               for value, bound in ((latitude, 90), (longitude, 180))):
+            raise LocationError("invalid_input")
+        return await self._lookup((float(latitude), float(longitude)), authorize=authorize)
+
+    @staticmethod
+    def _precise_reverse(item):
+        if not isinstance(item, dict) or item.get("result_type") not in {"building", "amenity", "street"}:
+            return False
+        distance = item.get("distance")
+        confidence = item.get("rank", {}).get("confidence") if isinstance(item.get("rank", {}), dict) else None
+        return (type(distance) in (int, float) and math.isfinite(distance) and 0 <= distance <= 25
+                and (confidence is None or type(confidence) in (int, float) and math.isfinite(confidence) and .8 <= confidence <= 1))
+
+    async def _lookup(self, query, *, authorize=None):
         if authorize is not None:
             authorize()
-        query = normalize_query(query)
         options = self.entry.options
         self._check_options(options)
         key = options.get(API_KEY_OPTION)

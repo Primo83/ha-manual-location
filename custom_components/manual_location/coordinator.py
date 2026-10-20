@@ -26,6 +26,7 @@ from .const import (
 )
 from .security import hash_pin, valid_pin, verify_pin
 from .gateway_bridge import GatewayBridge, GatewayError
+from .schedule import SourceSchedule, empty_schedule, switch_state, validate_schedule, MAX_RETURNS
 
 _LOGGER = logging.getLogger(__name__)
 _REFRESH_LOGGER = logging.getLogger(f"{__name__}.location_refresh")
@@ -102,9 +103,17 @@ def scenario_points(hass, points: object, *, check_day=True, day=None, allow_emp
         raise LocationError("invalid_input")
     result, instants, days = [], set(), set()
     for point in points:
-        if isinstance(point, dict) and "stop" in point:
-            normalized = coordinates({key: value for key, value in point.items() if key != "stop"})
-            normalized["stop"] = stop_label(point["stop"])
+        if isinstance(point, dict) and ("stop" in point or "name" in point):
+            normalized = coordinates({key: value for key, value in point.items() if key not in {"stop", "name"}})
+            if "stop" in point:
+                normalized["stop"] = stop_label(point["stop"])
+            if "name" in point:
+                if not isinstance(point["name"], str) or len(point["name"]) > 300 or any(
+                    unicodedata.category(char).startswith("C") for char in point["name"]
+                ):
+                    raise LocationError("invalid_input")
+                if point["name"].strip():
+                    normalized["name"] = point["name"].strip()
         else:
             normalized = coordinates(point)
         instant = timestamp(point.get("timestamp"))
@@ -161,7 +170,8 @@ def validate_scenarios(hass, scenarios: object) -> dict:
             key = f"legacy:{key}"
         if (
             not isinstance(key, str) or not 1 <= len(key) <= 120
-            or set(scenario) not in (new_fields, new_fields | {"routing"})
+            or set(scenario) - {"routing", "auto_custom", "auto_ha", "run_start_cursor", "run_id",
+                               "switch_cursor", "switch_state"} != new_fields
             or not isinstance(scenario["entity_id"], str) or not scenario["entity_id"].startswith("person.")
             or not isinstance(scenario["name"], str) or not 1 <= len(scenario["name"].strip()) <= 80
             or scenario["status"] not in {"draft", "running", "stopped", "completed"}
@@ -170,6 +180,25 @@ def validate_scenarios(hass, scenarios: object) -> dict:
         ):
             raise LocationError("invalid_input")
         scenario_day(scenario["day"])
+        for field in ("auto_custom", "auto_ha"):
+            if field in scenario and type(scenario[field]) is not bool:
+                raise LocationError("invalid_input")
+        for field in ("run_start_cursor", "switch_cursor"):
+            if field in scenario and (type(scenario[field]) is not int
+                                      or not 0 <= scenario[field] <= scenario["cursor"]):
+                raise LocationError("invalid_input")
+        if "run_id" in scenario and scenario["run_id"] is not None and (
+            not isinstance(scenario["run_id"], str) or not re.fullmatch(r"[a-f0-9]{32}", scenario["run_id"])
+        ):
+            raise LocationError("invalid_input")
+        if "switch_state" in scenario:
+            state = scenario["switch_state"]
+            if (not isinstance(state, dict) or set(state) != {"custom", "normal", "reason"}
+                    or state["custom"] not in {"pending", "done", "off"}
+                    or state["normal"] not in {"pending", "attempting", "started", "done", "skipped", "off"}
+                    or not isinstance(state["reason"], str) or len(state["reason"]) > 80
+                    or (state["custom"] == "pending" and not scenario.get("run_id"))):
+                raise LocationError("invalid_input")
         if "routing" in scenario:
             routing = scenario_routing(scenario["routing"])
             if routing is None:
@@ -340,6 +369,7 @@ class ManualLocation:
         self._location_history = None
         self._gateway_retry_cancel = None
         self._gateway_applied = None
+        self.source_schedule = SourceSchedule(self)
 
     @property
     def location_history(self):
@@ -415,6 +445,7 @@ class ManualLocation:
                     await self.location_history.async_recover()
                     if self.gateway.return_supported:
                         await self._async_gateway_return_reconcile(await self.gateway.status())
+                        await self.source_schedule.tick()
                 except GatewayError:
                     self._gateway_failed()
                 except Exception:
@@ -540,6 +571,21 @@ class ManualLocation:
         if self.gateway is None or not self.gateway.return_supported:
             return
         person_id = self.gateway.person_id
+        if "return_schedule" in self.data:
+            if start:
+                return
+            old = self.data["persons"].get(person_id, {}).get("current")
+            new = snapshot["persons"].get(person_id, {}).get("current")
+            if old == new:
+                return
+            # The durable queue owns future cutoffs. Close before disarming its
+            # projection, so a point write can never create an unguarded GPS gap.
+            await self._async_gateway_close(self.data["revision"])
+            status = await self._async_gateway_return_reconcile(await self.gateway.status())
+            await self.source_schedule.sync(status)
+            snapshot["return_schedule"] = deepcopy(self.data["return_schedule"])
+            snapshot["revision"] = max(snapshot["revision"], self.data["revision"] + 1)
+            return
         if not start:
             def target(data):
                 current = data["persons"].get(person_id, {}).get("current")
@@ -565,6 +611,8 @@ class ManualLocation:
     async def async_gateway_return(self, connection, token, revision, expected_id, local_time):
         async with self._save_lock:
             self.require_session(connection, token)
+            if "return_schedule" in self.data:
+                raise LocationError("client_outdated")
             if self.gateway is None:
                 raise LocationError("gateway_return_unavailable")
             try:
@@ -608,15 +656,94 @@ class ManualLocation:
             result = await self.gateway.status()
             result["current"] = await self.location_history.async_current()
             self.require_session(connection, token)
-            return result
+            return self.source_schedule.status(result)
         except GatewayError:
             self.require_session(connection, token)
             self._gateway_failed()
-            return {"enabled": True, "available": False, "person_id": self.gateway.person_id,
+            return self.source_schedule.status({"enabled": True, "available": False, "person_id": self.gateway.person_id,
                     "mode": "blocked", "pending": True, "gps_blocked": False, "remaining_seconds": 0,
                     "has_custom_point": False, "replay_required": False, "upstream_uncertain": False,
                     "recovery_retryable": False, "last_custom_receipt": None, "last_phone_receipt": None,
-                    "scheduled_return_supported": self.gateway.return_supported, "scheduled_return": None}
+                    "scheduled_return_supported": self.gateway.return_supported, "scheduled_return": None})
+
+    async def async_gateway_return_save(self, connection, token, revision, schedule_revision, event_id, local_time):
+        return await self._async_edit_return(connection, token, revision, schedule_revision, event_id, local_time)
+
+    async def async_gateway_return_delete(self, connection, token, revision, schedule_revision, event_id):
+        if not isinstance(event_id, str):
+            raise LocationError("invalid_input")
+        return await self._async_edit_return(connection, token, revision, schedule_revision, event_id, None)
+
+    async def _async_edit_return(self, connection, token, revision, schedule_revision, event_id, local_time):
+        async with self._save_lock:
+            self.require_session(connection, token)
+            self._require_revision(revision)
+            if self.gateway is None:
+                raise LocationError("gateway_return_unavailable")
+            if type(schedule_revision) is not int or (event_id is not None and not isinstance(event_id, str)):
+                raise LocationError("invalid_input")
+            current = self.data.get("return_schedule", empty_schedule())
+            if schedule_revision != current["revision"]:
+                raise LocationError("return_changed")
+            if event_id is not None and event_id.startswith("scenario:"):
+                raise LocationError("return_route_managed")
+            at = scheduled_return_at(self.hass, local_time) if local_time is not None else None
+            try:
+                status = await self._async_gateway_return_reconcile(await self.gateway.status())
+                self.require_session(connection, token)
+                if not status.get("scheduled_return_supported"):
+                    raise LocationError("gateway_return_unavailable")
+                if not status.get("has_custom_point"):
+                    raise LocationError("gateway_return_requires_custom")
+                await self.source_schedule.initialize(status)
+                snapshot = deepcopy(self.data)
+                schedule = snapshot["return_schedule"]
+                if event_id is not None and event_id not in schedule["manual"]:
+                    raise LocationError("return_changed")
+                if at is None:
+                    if event_id is None:
+                        raise LocationError("invalid_input")
+                    del schedule["manual"][event_id]
+                else:
+                    if event_id is None:
+                        if len(schedule["manual"]) >= MAX_RETURNS:
+                            raise LocationError("return_limit")
+                        event_id = secrets.token_hex(16)
+                    schedule["manual"][event_id] = {"at": at}
+                schedule["revision"] += 1
+                await self.source_schedule.persist(snapshot)
+                await self.source_schedule.tick()
+                self._reschedule()
+                result = self.source_schedule.status(await self.gateway.status())
+                result["snapshot"] = self._snapshot()
+                return result
+            except LocationError as error:
+                if error.code == "storage_error":
+                    self._gateway_failed()
+                raise
+            except GatewayError:
+                self._gateway_failed()
+                raise LocationError("gateway_return_unconfirmed") from None
+            except (Exception, asyncio.CancelledError):
+                self._gateway_failed()
+                raise
+            finally:
+                self._reschedule()
+
+    async def _async_cancel_route_warmup(self, previous, replacement):
+        if (self.gateway is None or not previous
+                or previous.get("switch_state", {}).get("normal") not in {"attempting", "started"}):
+            return
+        if replacement and replacement.get("auto_ha") and replacement.get("run_id") == previous.get("run_id"):
+            return
+        status = await self.gateway.status()
+        if status["mode"] == "warmup":
+            await self.source_schedule.enter_custom(status)
+            if replacement is not None:
+                replacement["switch_state"].update(normal="off" if not replacement.get("auto_ha") else "skipped",
+                                                    reason="normal_cancelled")
+            return True
+        return False
 
     @property
     def phone_activity(self):
@@ -647,7 +774,7 @@ class ManualLocation:
                 raise LocationError("storage_error")
         else:
             if (
-                not isinstance(stored, dict) or set(stored) - {"activity"} not in (
+                not isinstance(stored, dict) or set(stored) - {"activity", "return_schedule"} not in (
                     {"revision", "enabled", "persons"}, {"revision", "enabled", "persons", "scenarios"},
                     {"revision", "enabled", "persons", "quick_save"},
                     {"revision", "enabled", "persons", "scenarios", "quick_save"},
@@ -666,6 +793,13 @@ class ManualLocation:
                     self.hass, stored["persons"], stored["persons"], now, check_entities=False
                 )
                 stored["scenarios"] = validate_scenarios(self.hass, stored.get("scenarios", {}))
+                for scenario in stored["scenarios"].values():
+                    if scenario["status"] == "running" and "run_start_cursor" not in scenario:
+                        # An old executed prefix does not prove this restored run
+                        # has started. Preserve waiting plans and deny old HA consent.
+                        scenario.update(run_start_cursor=scenario["cursor"], auto_ha=False)
+                if "return_schedule" in stored:
+                    stored["return_schedule"] = validate_schedule(stored["return_schedule"])
                 stored["activity"] = validate_activity(self.hass, stored.get("activity", {}), check_entities=False)
                 stored["quick_save"] = validate_quick_save(
                     self.hass, stored.get("quick_save", {"nicknames": {}, "entity_id": None}), check_entities=False,
@@ -1043,6 +1177,7 @@ class ManualLocation:
                 "scenarios": deepcopy(self.data["scenarios"]),
                 "quick_save": deepcopy(self.data["quick_save"]) if quick_save is _UNSET else validate_quick_save(self.hass, quick_save),
                 "activity": deepcopy(self.data["activity"]) if activity is _UNSET else validate_activity(self.hass, activity, self.data["activity"]),
+                **({"return_schedule": deepcopy(self.data["return_schedule"])} if "return_schedule" in self.data else {}),
             }
             if (self.gateway is not None and return_status is not None and return_status.get("handoff_supported")
                     and enabled and self.gateway.person_id in snapshot["persons"]
@@ -1067,16 +1202,28 @@ class ManualLocation:
                     raise LocationError("invalid_input")
             for scenario in snapshot["scenarios"].values():
                 entity_id = scenario["entity_id"]
+                changed_person = snapshot["persons"].get(entity_id) != self.data["persons"].get(entity_id)
+                if (scenario["status"] == "completed"
+                        and scenario.get("switch_state", {}).get("normal") in {"pending", "attempting", "started"}
+                        and (not enabled or changed_person)):
+                    scenario["switch_state"].update(normal="skipped", reason="normal_interrupted")
                 if scenario["status"] == "running":
                     if not enabled:
                         scenario.update(status="stopped", reason="global_disabled")
-                    elif snapshot["persons"].get(entity_id) != self.data["persons"].get(entity_id):
+                    elif changed_person and scenario["cursor"] > scenario.get("run_start_cursor", 0):
                         scenario.update(status="stopped", reason="manual_change")
+            if (gateway_mode == "normal" and "return_schedule" in self.data
+                    and self.source_schedule.conflict(snapshot, datetime.now(UTC))):
+                raise LocationError("return_custom_conflict")
             await self._commit(snapshot, gateway_normal=gateway_mode == "normal")
             if explicit_own and self.gateway is not None and self._gateway_current(snapshot) is not None:
                 await self.location_history.async_own_current()
             if gateway_mode == "normal" and self.gateway.ready and not self.gateway.pending:
                 try:
+                    if "return_schedule" in self.data:
+                        status = await self.source_schedule.sync(opening=True)
+                        normal_generation = {"expected_id": status["scheduled_return"]["id"]
+                                             if status["scheduled_return"] else None}
                     key = self.gateway.key(snapshot["revision"], "normal")
                     await self.location_history.begin_normal(key)
                     await self.gateway.normal(key, **normal_generation)
@@ -1089,7 +1236,8 @@ class ManualLocation:
             self.phone_activity.rebind()
             return self._snapshot()
 
-    async def async_save_scenario(self, connection, token, revision, scenario_id, entity_id, day, name, points, *, routing=_UNSET):
+    async def async_save_scenario(self, connection, token, revision, scenario_id, entity_id, day, name, points, *,
+                                  routing=_UNSET, auto_custom=_UNSET, auto_ha=_UNSET, point_names_version=_UNSET):
         async with self._save_lock:
             self.require_session(connection, token)
             await self._async_gateway_return_preflight()
@@ -1108,6 +1256,18 @@ class ManualLocation:
                 raise LocationError("scenario_missing")
             if previous and previous["entity_id"] != entity_id:
                 raise LocationError("invalid_input")
+            if point_names_version is not _UNSET and (type(point_names_version) is not int or point_names_version != 1):
+                raise LocationError("invalid_input")
+            if previous and any("name" in point for point in previous["points"]) and point_names_version is _UNSET:
+                raise LocationError("client_outdated")
+            if ((auto_custom is not _UNSET and type(auto_custom) is not bool)
+                    or (auto_ha is not _UNSET and type(auto_ha) is not bool)):
+                raise LocationError("invalid_input")
+            modern = auto_custom is not _UNSET or auto_ha is not _UNSET or bool(previous and "auto_custom" in previous)
+            custom_option = previous.get("auto_custom", True) if auto_custom is _UNSET and previous else (True if auto_custom is _UNSET else auto_custom)
+            ha_option = previous.get("auto_ha", False) if auto_ha is _UNSET and previous else (False if auto_ha is _UNSET else auto_ha)
+            if ha_option and (self.gateway is None or entity_id != self.gateway.person_id or not self.gateway.return_supported):
+                raise LocationError("gateway_return_unavailable")
             if routing is _UNSET and previous and (
                 "routing" in previous or any("stop" in point for point in previous["points"])
             ):
@@ -1135,6 +1295,20 @@ class ManualLocation:
                 "entity_id": entity_id, "day": day, "name": name.strip(), "points": normalized,
                 "status": status, "cursor": cursor, "reason": reason,
             }
+            saved = snapshot["scenarios"][scenario_id]
+            if modern or previous and "run_start_cursor" in previous:
+                saved.update(auto_custom=custom_option, auto_ha=ha_option,
+                             run_start_cursor=previous.get("run_start_cursor", 0) if previous else 0,
+                             run_id=previous.get("run_id") if previous else None,
+                             switch_cursor=previous.get("switch_cursor", cursor) if previous else cursor,
+                             switch_state=deepcopy(previous.get("switch_state", switch_state(False, False))) if previous else switch_state(False, False))
+                changed_schedule = previous and (
+                    [{k: p[k] for k in ("latitude", "longitude", "timestamp")} for p in normalized] !=
+                    [{k: p[k] for k in ("latitude", "longitude", "timestamp")} for p in previous["points"]]
+                    or custom_option != previous.get("auto_custom", True) or ha_option != previous.get("auto_ha", False))
+                if status == "running" and changed_schedule:
+                    saved.update(run_id=secrets.token_hex(16), switch_cursor=cursor,
+                                 switch_state=switch_state(custom_option, ha_option))
             if normalized_routing is not None:
                 snapshot["scenarios"][scenario_id]["routing"] = normalized_routing
             if status == "running":
@@ -1143,13 +1317,18 @@ class ManualLocation:
                 now = datetime.now(UTC)
                 if any(timestamp(point["timestamp"]) <= now for point in normalized[cursor:]):
                     raise LocationError("pending_in_past")
-                if problem := self._scenario_problem(snapshot, entity_id, snapshot["scenarios"][scenario_id]):
+                if problem := self._scenario_problem(snapshot, entity_id, snapshot["scenarios"][scenario_id], waiting=True):
                     raise LocationError(problem)
+            if await self._async_cancel_route_warmup(previous, saved):
+                snapshot["persons"][self.gateway.person_id] = deepcopy(self.data["persons"][self.gateway.person_id])
+                snapshot["revision"] = self.data["revision"] + 1
             await self._commit(snapshot)
+            if self.gateway is not None and "return_schedule" in self.data:
+                await self.source_schedule.tick()
             self._reschedule()
             return self._snapshot()
 
-    def _scenario_problem(self, snapshot, entity_id, scenario):
+    def _scenario_problem(self, snapshot, entity_id, scenario, *, waiting=False):
         if not snapshot["enabled"]:
             return "global_disabled"
         if self.hass.states.get(entity_id) is None:
@@ -1157,7 +1336,11 @@ class ManualLocation:
         person = snapshot["persons"].get(entity_id)
         if person is None and len(snapshot["persons"]) >= MAX_PERSONS:
             return "person_limit"
-        if person and not person["enabled"]:
+        protected = self.gateway is not None and entity_id == self.gateway.person_id
+        if protected and (not person or not person["enabled"]):
+            if not waiting:
+                return "person_disabled"
+        elif person and not person["enabled"]:
             return "person_disabled"
         history = person["history"] if person else []
         pending = scenario["points"][scenario["cursor"]:]
@@ -1178,6 +1361,22 @@ class ManualLocation:
         )
         for scenario_id, scenario in running:
             entity_id = scenario["entity_id"]
+            pending_at = timestamp(scenario["points"][scenario["cursor"]]["timestamp"])
+            if pending_at > now:
+                # A waiting route may intentionally remain in HA until its own deadline.
+                if not snapshot["enabled"] or self.hass.states.get(entity_id) is None:
+                    scenario.update(status="stopped", reason="global_disabled" if not snapshot["enabled"] else "person_missing")
+                    changed = True
+                continue
+            if (self.gateway is not None and entity_id == self.gateway.person_id
+                    and snapshot["persons"].get(entity_id, {}).get("enabled") is True
+                    and not self.source_schedule.custom_ready):
+                if not scenario.get("auto_custom", True):
+                    scenario.update(status="stopped", reason="person_disabled")
+                    changed = True
+                else:
+                    self._retry_at = now + timedelta(seconds=5)
+                continue
             if reason := self._scenario_problem(snapshot, entity_id, scenario):
                 scenario.update(status="stopped", reason=reason)
                 changed = True
@@ -1208,14 +1407,28 @@ class ManualLocation:
             self._require_revision(revision)
             if not isinstance(scenario_id, str) or not isinstance(action, str) or action not in {"start", "stop", "delete"}:
                 raise LocationError("invalid_input")
+            existing = self.data["scenarios"].get(scenario_id)
+            if (existing is not None and self.gateway is not None and existing["entity_id"] == self.gateway.person_id
+                    and self.gateway.return_supported and action == "start"):
+                try:
+                    await self.source_schedule.initialize(await self.gateway.status())
+                except GatewayError:
+                    self._gateway_failed()
+                    raise LocationError("return_status_unavailable") from None
             snapshot = self._snapshot()
             scenario = snapshot["scenarios"].get(scenario_id)
             if scenario is None:
                 raise LocationError("scenario_missing")
             entity_id = scenario["entity_id"]
             if action == "delete":
+                if await self._async_cancel_route_warmup(scenario, None):
+                    snapshot["persons"][self.gateway.person_id] = deepcopy(self.data["persons"][self.gateway.person_id])
+                    snapshot["revision"] = self.data["revision"]
                 del snapshot["scenarios"][scenario_id]
             elif action == "stop":
+                if await self._async_cancel_route_warmup(scenario, None):
+                    snapshot["persons"][self.gateway.person_id] = deepcopy(self.data["persons"][self.gateway.person_id])
+                    snapshot["revision"] = self.data["revision"]
                 scenario.update(status="stopped", reason="user_stop")
             else:
                 if self.gateway is not None and entity_id == self.gateway.person_id:
@@ -1224,17 +1437,40 @@ class ManualLocation:
                     raise LocationError("scenario_running")
                 if scenario["cursor"] == len(scenario["points"]):
                     raise LocationError("no_pending_points")
-                if reason := self._scenario_problem(snapshot, entity_id, scenario):
+                if (self.gateway is not None and entity_id == self.gateway.person_id
+                        and not scenario.get("auto_custom", True)):
+                    try:
+                        confirmed = self.source_schedule.confirmed_custom(await self.gateway.status())
+                    except GatewayError:
+                        self._gateway_failed()
+                        raise LocationError("return_status_unavailable") from None
+                    if not snapshot["persons"].get(entity_id, {}).get("enabled", False) or not confirmed:
+                        raise LocationError("person_disabled")
+                if reason := self._scenario_problem(snapshot, entity_id, scenario, waiting=True):
                     raise LocationError(reason)
-                scenario.update(status="running", reason="")
+                scenario.update(status="running", reason="", run_start_cursor=scenario["cursor"],
+                                run_id=secrets.token_hex(16), switch_cursor=scenario["cursor"],
+                                auto_custom=scenario.get("auto_custom", True), auto_ha=scenario.get("auto_ha", False),
+                                switch_state=switch_state(scenario.get("auto_custom", True), scenario.get("auto_ha", False)))
+                if (self.gateway is not None and entity_id == self.gateway.person_id
+                        and self.gateway.return_supported):
+                    snapshot.setdefault("return_schedule", empty_schedule())
                 validate_running_intervals(snapshot["scenarios"])
                 # Explicit Start is permission to recover this suspended plan.
                 suspended = scenario_id in self._suspended
                 self._suspended.discard(scenario_id)
                 try:
-                    self._advance_scenarios(snapshot, datetime.now(UTC))
+                    if self.gateway is None:
+                        self._advance_scenarios(snapshot, datetime.now(UTC))
                     snapshot["revision"] += 1
                     await self._commit(snapshot)
+                    if self.gateway is not None:
+                        await self.source_schedule.tick()
+                        snapshot = deepcopy(self.data)
+                        if self._advance_scenarios(snapshot, datetime.now(UTC)):
+                            snapshot["revision"] += 1
+                            await self._commit(snapshot)
+                        await self.source_schedule.tick()
                 except Exception:
                     if suspended:
                         self._suspended.add(scenario_id)
@@ -1243,6 +1479,8 @@ class ManualLocation:
                 return self._snapshot()
             snapshot["revision"] += 1
             await self._commit(snapshot)
+            if self.gateway is not None and "return_schedule" in self.data:
+                await self.source_schedule.tick()
             self._reschedule()
             return self._snapshot()
 
@@ -1293,15 +1531,15 @@ class ManualLocation:
             scenario_id: scenario for scenario_id, scenario in self.data["scenarios"].items()
             if scenario["status"] == "running" and scenario_id not in self._suspended
         }
-        if not running:
+        deadlines = self.source_schedule.deadlines()
+        if not running and not deadlines:
             return
-        self._state_cancel = async_track_state_change_event(
-            self.hass, sorted({scenario["entity_id"] for scenario in running.values()}), self._async_person_changed,
-        )
-        deadline = self._retry_at or min(
-            timestamp(scenario["points"][scenario["cursor"]]["timestamp"])
-            for scenario in running.values()
-        )
+        if running:
+            self._state_cancel = async_track_state_change_event(
+                self.hass, sorted({scenario["entity_id"] for scenario in running.values()}), self._async_person_changed,
+            )
+        deadlines.extend(timestamp(scenario["points"][scenario["cursor"]]["timestamp"]) for scenario in running.values())
+        deadline = self._retry_at or min(deadlines)
         self._timer_cancel = async_track_point_in_utc_time(self.hass, self._async_run_due, deadline)
 
     async def _async_person_changed(self, event):
@@ -1315,7 +1553,11 @@ class ManualLocation:
                 return
             try:
                 await self._async_gateway_return_preflight()
+                if self.gateway is not None:
+                    await self.source_schedule.tick()
             except Exception:
+                if self.gateway is not None:
+                    self._gateway_failed()
                 self._retry_at = datetime.now(UTC) + timedelta(seconds=5)
                 self._reschedule()
                 self._schedule_gateway_retry()
@@ -1325,6 +1567,7 @@ class ManualLocation:
                 self._retry_at = datetime.now(UTC) + timedelta(seconds=5)
                 self._reschedule()
                 return
+            self._retry_at = None
             # HA passes the originally requested deadline to this callback, even
             # when it fires late. Catch up to actual UTC now in one transaction.
             now = datetime.now(UTC)
@@ -1333,6 +1576,8 @@ class ManualLocation:
                 snapshot["revision"] += 1
                 try:
                     await self._commit(snapshot)
+                    if self.gateway is not None:
+                        await self.source_schedule.tick()
                 except Exception:
                     if not self.loaded:
                         return

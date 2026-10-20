@@ -1,5 +1,5 @@
-import { callWS, coordinates, errorText } from "./data.js?v=2.0.4";
-import "./place-search.js?v=2.0.4";
+import { callWS, coordinates, errorText } from "./data.js?v=2.1.0";
+import "./place-search.js?v=2.1.0";
 
 const MODES = { walk: "Pieszo", drive: "Samochód", bicycle: "Rower", transit: "Komunikacja publiczna · szacunek" };
 const INTERVALS = [1, 5, 10, 15, 20, 30, 45, 60, 90, 120];
@@ -76,7 +76,7 @@ export class ManualLocationRouteImport extends HTMLElement {
     set("spacing", random ? "random" : "fixed"); set("interval", String(routing.interval_minutes));
     set("min", String(routing.interval_minutes)); set("max", String(routing.interval_max_minutes ?? routing.interval_minutes));
     this._stops = stops.map((point) => coordinates(point) ? { latitude: point.latitude, longitude: point.longitude,
-      label: String(point.label || "").slice(0, 300) } : { query: point.query });
+      label: String(point.label || "").slice(0, 300), ...(validStop(point.name) ? { name: point.name } : {}) } : { query: point.query });
     this._replan = !!replan; this._startFromNow = !!replan && startFromNow === true;
     this._lockedFields = replan ? { source: "direct", day, start: startTime } : null;
     this._dirty = true; this._showStops(); this._resolvedContext = this._capture(); this._buttons();
@@ -379,6 +379,18 @@ export class ManualLocationRouteImport extends HTMLElement {
         || (random && (!Number.isInteger(response.duration_seconds) || response.points.some((point) => !Number.isInteger(point.offset_seconds))))
         || Math.abs(response.points.at(-1).offset_seconds - response.duration_seconds) > .001) throw { code: "route_invalid_response" };
       this._resolvedContext = null;
+      // Names belong to the selected place object, which moves with reorder and
+      // is replaced when the user chooses a different place. Measurements never
+      // inherit a stop name merely because they happen to have its coordinates.
+      const namedStops = this._stops.some((point) => point.name);
+      if (namedStops) {
+        const stops = response.points.filter((point) => point.stop !== undefined);
+        if (stops.length !== this._stops.length) throw { code: "route_invalid_response" };
+        stops.forEach((point, index) => {
+          const name = this._stops[index].name;
+          if (name) point.name = name;
+        });
+      }
       try { this._context.onImport(response, settings); }
       catch (error) { this._message(error.message || "Nie można utworzyć szkicu dla wybranego dnia i godziny."); return; }
       this.resetRoute();

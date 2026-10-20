@@ -150,7 +150,10 @@ export function errorText(error) {
   const messages = {
     revision_conflict: "Dane zmieniono w innej sesji. Twoje zmiany pozostały w formularzu. Wczytaj zapisane dane i wprowadź je ponownie.",
     invalid_return_time: "Wybierz przyszłą datę i godzinę w strefie Home Assistant. Godzina pominięta lub powtórzona przy zmianie czasu jest niejednoznaczna; wybierz inną.",
-    return_changed: "Termin zmienił się podczas edycji. Wczytaj zapisane dane i ustaw go ponownie.",
+    return_changed: "Lista terminów zmieniła się podczas edycji. Odrzuć edycję terminu i wybierz go ponownie z aktualnej listy.",
+    return_custom_conflict: "Najbliższa uruchomiona trasa wymaga już custom lub będzie go wymagać podczas karencji. Zachowano custom i przyszłą trasę. Jej zatrzymanie jest osobną akcją.",
+    return_route_managed: "Tym przełączeniem steruje trasa. Otwórz wskazaną trasę i zmień jej opcje lub zatrzymaj ją.",
+    return_limit: "Osiągnięto limit przyszłych terminów. Usuń niepotrzebny ręczny termin przed dodaniem kolejnego.",
     gateway_return_unavailable: "Termin wymaga bramki z obsługą automatycznego powrotu. Sprawdź jej wersję i połączenie.",
     gateway_return_unconfirmed: "Nie potwierdzono zakończenia przełączenia lub zapisu terminu. Sprawdź stan przed ponowną próbą; szkic pozostał w formularzu.",
     gateway_return_recovering: "Trwa powrót do custom. Poczekaj na potwierdzenie własnej pozycji przed zmianą terminu.",

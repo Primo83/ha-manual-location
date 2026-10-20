@@ -20,6 +20,8 @@ FIELDS = {
     "admin_get": {"token"},
     "gateway_status": {"token"},
     "gateway_return": {"token", "revision", "expected_id", "local_time"},
+    "gateway_return_save": {"token", "revision", "schedule_revision", "event_id", "local_time"},
+    "gateway_return_delete": {"token", "revision", "schedule_revision", "event_id"},
     "ha_history": {"token", "entity_id", "start", "end", "cursor"},
     "ha_history_preview": {"token", "entity_id", "revision", "selection"},
     "ha_history_range_preview": {"token", "entity_id", "revision", "start", "end", "include_custom"},
@@ -27,6 +29,7 @@ FIELDS = {
     "quick_save_info": set(),
     "refresh_location": {"entity_id"},
     "geocode": {"token", "query"},
+    "geocode_reverse": {"token", "latitude", "longitude"},
     "route_resolve": {"token", "url"},
     "route_import": {"token", "points", "mode", "interval_minutes", "duration_minutes"},
     "admin_save": {"token", "revision", "enabled", "persons"},
@@ -60,6 +63,7 @@ async def async_handle_command(hass, connection, msg):
             fields.discard("quick_save")
             fields.discard("activity")
             fields.discard("gateway_mode")
+            fields.discard("return_schedule")
         if operation in {"scenario_save", "scenario_action"} and "scenario_id" not in fields:
             raise LocationError("client_outdated")
         # Older clients omit the optional upper bound and keep fixed intervals.
@@ -67,6 +71,9 @@ async def async_handle_command(hass, connection, msg):
             fields.discard("interval_max_minutes")
         if operation == "scenario_save":
             fields.discard("routing")
+            fields.discard("point_names_version")
+            fields.discard("auto_custom")
+            fields.discard("auto_ha")
         if operation == "refresh_location":
             fields.discard("wait_for_report")
         if fields != FIELDS[operation]:
@@ -84,6 +91,14 @@ async def async_handle_command(hass, connection, msg):
         elif operation == "gateway_return":
             result = await coordinator.async_gateway_return(
                 connection, msg["token"], msg["revision"], msg["expected_id"], msg["local_time"],
+            )
+        elif operation == "gateway_return_save":
+            result = await coordinator.async_gateway_return_save(
+                connection, msg["token"], msg["revision"], msg["schedule_revision"], msg["event_id"], msg["local_time"],
+            )
+        elif operation == "gateway_return_delete":
+            result = await coordinator.async_gateway_return_delete(
+                connection, msg["token"], msg["revision"], msg["schedule_revision"], msg["event_id"],
             )
         elif operation.startswith("ha_history"):
             coordinator.require_session(connection, msg["token"])
@@ -117,12 +132,14 @@ async def async_handle_command(hass, connection, msg):
             result = await coordinator.async_refresh_location(
                 connection, msg["entity_id"], wait_for_report=msg.get("wait_for_report", False),
             )
-        elif operation == "geocode":
+        elif operation in {"geocode", "geocode_reverse"}:
             coordinator.require_session(connection, msg["token"])
             try:
-                result = await coordinator.geocoder.async_search(
-                    msg["query"], authorize=lambda: coordinator.require_session(connection, msg["token"]),
-                )
+                authorize = lambda: coordinator.require_session(connection, msg["token"])
+                if operation == "geocode_reverse":
+                    result = await coordinator.geocoder.async_reverse(msg["latitude"], msg["longitude"], authorize=authorize)
+                else:
+                    result = await coordinator.geocoder.async_search(msg["query"], authorize=authorize)
             finally:
                 coordinator.require_session(connection, msg["token"])
         elif operation in {"route_resolve", "route_import"}:
@@ -152,6 +169,9 @@ async def async_handle_command(hass, connection, msg):
             result = await coordinator.async_save_scenario(
                 connection, msg["token"], msg["revision"], msg["scenario_id"], msg["entity_id"], msg["day"], msg["name"], msg["points"],
                 **({"routing": msg["routing"]} if "routing" in msg else {}),
+                **({"point_names_version": msg["point_names_version"]} if "point_names_version" in msg else {}),
+                **({"auto_custom": msg["auto_custom"]} if "auto_custom" in msg else {}),
+                **({"auto_ha": msg["auto_ha"]} if "auto_ha" in msg else {}),
             )
         elif operation == "scenario_action":
             result = await coordinator.async_scenario_action(

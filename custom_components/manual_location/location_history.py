@@ -5,9 +5,12 @@ from copy import deepcopy
 from datetime import UTC, datetime, timedelta
 import json
 import hashlib
+import hmac
 import math
 from pathlib import Path
+import re
 import secrets
+import sys
 import time
 
 from homeassistant.auth.permissions.const import POLICY_READ
@@ -17,6 +20,8 @@ from .coordinator import LocationError, timestamp
 from .gateway_bridge import GatewayError
 
 MAX_VIEW_BYTES = 8 * 1024 * 1024
+SNAPSHOT_SECONDS = 300
+SNAPSHOT_MEMORY = 32 * 1024 * 1024
 
 
 def _number(value):
@@ -40,12 +45,16 @@ class LocationHistory:
         self.active_grant = None
         self.previews = {}
         self._closing = False
+        self._snapshots_cache = {}
+        self._snapshot_timer = None
+        self._selection_key = secrets.token_bytes(32)
 
     def stop(self):
         """Revoke callbacks before unloading waits for any other writer."""
         self._closing = True
         self.close_confirmed()
         self.previews.clear()
+        self._clear_snapshots()
 
     async def async_shutdown(self):
         self.stop()
@@ -284,9 +293,95 @@ class LocationHistory:
         revision = self.coordinator.data["revision"]
         db = await self.async_prepare()
         self._authorize(connection, token, entity_id)
-        result = await db.async_panel_page(start, end, cursor, 100)
+        try:
+            parsed = json.loads(cursor) if isinstance(cursor, str) else None
+        except (ValueError, TypeError):
+            parsed = None
+        if isinstance(parsed, dict) and "snapshot_version" in parsed:
+            result = await self._snapshot_page(connection, token, entity_id, start, end, parsed, revision, db)
+        else:
+            # Existing clients retain the original fresh-range hash contract.
+            result = await db.async_panel_page(start, end, cursor, 100)
         self._authorize(connection, token, entity_id, revision)
         return {**result, "history_revision": result["revision"], "revision": revision, "supported": True}
+
+    def _clear_snapshots(self):
+        self._snapshots_cache.clear()
+        if self._snapshot_timer:
+            self._snapshot_timer.cancel()
+            self._snapshot_timer = None
+
+    def _expire_snapshots(self):
+        if self._snapshot_timer:
+            self._snapshot_timer.cancel()
+            self._snapshot_timer = None
+        now = time.monotonic()
+        self._snapshots_cache = {key: entry for key, entry in self._snapshots_cache.items()
+                                 if entry["expires"] > now}
+        if self._snapshots_cache and not self._closing:
+            delay = max(0.01, min(entry["expires"] for entry in self._snapshots_cache.values()) - now)
+            self._snapshot_timer = self.hass.loop.call_later(delay, self._expire_snapshots)
+
+    def _selection_proof(self, connection, token, entity_id, revision, snapshot_id, ref, fingerprint):
+        payload = json.dumps([id(connection), token, entity_id, revision, snapshot_id, ref, fingerprint],
+                             separators=(",", ":")).encode()
+        return hmac.new(self._selection_key, payload, hashlib.sha256).hexdigest()
+
+    async def _snapshot_page(self, connection, token, entity_id, start, end, cursor, revision, db):
+        if type(cursor.get("snapshot_version")) is not int or cursor["snapshot_version"] != 1:
+            raise LocationError("history_changed")
+        self._expire_snapshots()
+        scope = (connection, token, entity_id, self.tracker_id, start, end, revision)
+        offset = 0
+        if set(cursor) == {"snapshot_version"}:
+            rows, signature, history_revision = await db.async_panel_snapshot(start, end)
+            self._authorize(connection, token, entity_id, revision)
+            snapshot_id = secrets.token_urlsafe(24)
+            entry = {"scope": scope, "rows": rows, "signature": signature, "revision": history_revision,
+                     "delete_epoch": db.delete_epoch,
+                     "captured_at": datetime.now(UTC).isoformat(), "expires": time.monotonic() + SNAPSHOT_SECONDS}
+            # Count the actual compact objects, including the container and metadata.
+            entry["bytes"] = (sys.getsizeof(rows) + sum(map(sys.getsizeof, rows))
+                              + sys.getsizeof(entry) + sys.getsizeof(scope)
+                              + sum(sys.getsizeof(value) for value in scope)
+                              + sum(sys.getsizeof(value) for key, value in entry.items() if key not in {"rows", "scope"})
+                              + sys.getsizeof(snapshot_id) + 1024)
+            if entry["bytes"] > SNAPSHOT_MEMORY:
+                raise LocationError("history_too_large")
+            for key, previous in list(self._snapshots_cache.items()):
+                if previous["scope"][0] is connection and previous["scope"][1] == token:
+                    matching = [item for item in self._snapshots_cache.values()
+                                if item["scope"][0] is connection and item["scope"][1] == token]
+                    if len(matching) >= 2:
+                        del self._snapshots_cache[key]
+            while self._snapshots_cache and (len(self._snapshots_cache) >= 8
+                    or sum(item["bytes"] for item in self._snapshots_cache.values()) + entry["bytes"] > SNAPSHOT_MEMORY):
+                del self._snapshots_cache[next(iter(self._snapshots_cache))]
+            self._snapshots_cache[snapshot_id] = entry
+        elif set(cursor) == {"snapshot_version", "snapshot_id", "offset"}:
+            snapshot_id, offset = cursor["snapshot_id"], cursor["offset"]
+            if not isinstance(snapshot_id, str) or type(offset) is not int or offset < 100 or offset % 100:
+                raise LocationError("history_changed")
+            entry = self._snapshots_cache.get(snapshot_id)
+            if (entry is None or entry["scope"] != scope or offset >= len(entry["rows"])
+                    or db.pending or entry["delete_epoch"] != db.delete_epoch):
+                raise LocationError("history_changed")
+        else:
+            raise LocationError("history_changed")
+        entry["expires"] = time.monotonic() + SNAPSHOT_SECONDS
+        self._expire_snapshots()
+        selected = [json.loads(row) for row in entry["rows"][offset:offset + 100]]
+        for row in selected:
+            row["snapshot_id"] = snapshot_id
+            row["proof"] = self._selection_proof(connection, token, entity_id, revision, snapshot_id,
+                                                 row["ref"], row["fingerprint"])
+        has_more = offset + 100 < len(entry["rows"])
+        return {"rows": selected, "has_more": has_more, "revision": entry["revision"],
+                "total_rows": len(entry["rows"]),
+                "signature": entry["signature"], "snapshot_id": snapshot_id, "snapshot_version": 1,
+                "captured_at": entry["captured_at"], "start": start, "end": end,
+                "next_cursor": json.dumps({"snapshot_version": 1, "snapshot_id": snapshot_id,
+                                           "offset": offset + 100}) if has_more else None}
 
     async def _custom_snapshots(self):
         coordinator, bridge = self.coordinator, self.coordinator.gateway
@@ -347,23 +442,38 @@ class LocationHistory:
                     removed = [point for point in person["history"] if a <= timestamp(point["timestamp"]) <= b]
                     if removed:
                         person["history"] = [point for point in person["history"] if not a <= timestamp(point["timestamp"]) <= b]
+                        for scenario in target.get("scenarios", {}).values():
+                            if (scenario["entity_id"] == entity_id and scenario["status"] == "running"
+                                    and scenario["cursor"] > scenario.get("run_start_cursor", 0)):
+                                scenario.update(status="stopped", reason="manual_change")
                         target["revision"] += 1
                         own_plan = {"before_hash": _snapshot_hash(self.coordinator.data),
                                     "after_hash": _snapshot_hash(target), "target_snapshot": target}
             else:
                 if not isinstance(selection, list) or not 1 <= len(selection) <= 100:
                     raise LocationError("invalid_input")
-                gps_ids, native_ids = [], []
+                gps_ids, native_ids, fingerprints = [], [], {}
                 for row in selection:
-                    if not isinstance(row, dict) or set(row) != {"kind", "ref"} or not isinstance(row["ref"], str):
+                    if (not isinstance(row, dict) or set(row) not in (
+                            {"kind", "ref"}, {"kind", "ref", "snapshot_id", "fingerprint", "proof"})
+                            or not isinstance(row.get("ref"), str)):
                         raise LocationError("invalid_input")
+                    if "snapshot_id" in row:
+                        if (any(not isinstance(row[key], str) or not row[key] or len(row[key]) > 256
+                                for key in ("snapshot_id", "fingerprint", "proof"))
+                                or any(re.fullmatch(r"[0-9a-f]{64}", row[key]) is None for key in ("fingerprint", "proof"))
+                                or not hmac.compare_digest(row["proof"], self._selection_proof(
+                                    connection, token, entity_id, revision, row["snapshot_id"], row["ref"], row["fingerprint"]))):
+                            raise LocationError("history_changed")
+                        # A signed row remains selectable after cache expiry; freshness is checked below.
+                        fingerprints[row["ref"]] = row["fingerprint"]
                     if row["kind"] == "accepted" and row["ref"].startswith("accepted:"):
                         gps_ids.append(row["ref"].removeprefix("accepted:"))
                     elif row["kind"] == "native" and row["ref"].startswith("native:") and row["ref"][7:].isdigit():
                         native_ids.append(int(row["ref"][7:]))
                     else:
                         raise LocationError("invalid_input")
-                preview = await db.async_preview(gps_ids, native_ids, states)
+                preview = await db.async_preview(gps_ids, native_ids, states, fingerprints)
             self._authorize(connection, token, entity_id, revision)
             if not removed and not preview["counts"].get("native") and not preview["counts"].get("accepted"):
                 raise LocationError("history_empty_selection")
@@ -396,6 +506,7 @@ class LocationHistory:
                 raise LocationError("history_changed")
             await self._custom_snapshots()
             self._authorize(connection, token, entity_id, revision)
+            self._clear_snapshots()
             if preview["own_plan"] is not None:
                 await self._check_own_plan(preview["own_plan"])
             try:
@@ -436,6 +547,7 @@ class LocationHistory:
 
     async def async_recover(self):
         if self.db is not None and self.db.pending:
+            self._clear_snapshots()
             states = await self._custom_snapshots()
             if not await self.db.async_recover(states, own_commit=self._commit_own):
                 raise LocationError("history_unavailable")
