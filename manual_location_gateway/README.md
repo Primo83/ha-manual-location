@@ -1,5 +1,9 @@
 # Manual Location Gateway
 
+Wersja 2.0.5 wraz z integracją 2.1.1 pozwala usunąć bieżący punkt podczas HA GPS. Bramka najpierw zapisuje plan korekty, ustawia pozostałą potwierdzoną pozycję w HA i dopiero zamyka usunięcie historii. Kolejne raporty telefonu nadal działają przy poprawnym zakończeniu. Nowy raport przyjęty przed wykonaniem korekty ma pierwszeństwo. Brak bezpiecznego zastępstwa lub nierozstrzygnięta operacja blokuje zmianę.
+
+Aktualizacja App restartuje bramkę i zgodnie z dotychczasową ochroną zamyka GPS. Zainstaluj App 2.0.5, następnie integrację 2.1.1 i wykonaj restart HA. Powrót do HA GPS wymaga świadomego wyboru w panelu. Nie cofaj App podczas niedokończonej korekty; starszy kod nie obsługuje jej dziennika.
+
 App towarzyszy integracji Manual Location 2.0. Panel i przełącznik pozostają w dotychczasowej wtyczce. Normalny GPS wymaga świadomego zapisu właściciela i 5 minut karencji. Restart App lub HA nie przywraca normalnego GPS.
 
 Wersja 2.0.4 zachowuje jednorazowy termin powrotu z panelu PIN i zamraża ostatni przyjęty punkt HA jako początek custom. Dotyczy to również ręcznego przełączenia samego źródła. Jeśli od własnego punktu nie przyjęto nowego raportu, zostaje on z dotychczasową godziną. Jawne ustawienie innego punktu nadal działa. Aktualizuj przy zamkniętym GPS najpierw App, potem integrację 2.0.4 i wykonaj pełny restart HA. Termin przechowuje bramka, więc zamknięcie nowych raportów nie zależy od działania HA. Wcześniej dopuszczone żądanie może zakończyć się już po terminie. Wspólna historia pozostaje, zatrzymana trasa nie startuje sama. Anulowanie nie włącza GPS. Nowy checkpoint v4 wymaga zgodnej App; starsza pozostanie zamknięta.

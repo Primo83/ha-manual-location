@@ -153,7 +153,7 @@ class Gateway:
                  production_mode=False, max_ws_message_bytes=None, backend_ssl_server_hostname=None,
                  denied_webhooks=(), allowed_push_url=None, registration_guard=None, backend_ssl_context=None,
                  phone_snapshot=None, record_phone=None, wall_clock=time.time,
-                 core_boot=None, query_phone=None, native_target=None):
+                 core_boot=None, query_phone=None, native_target=None, correct_history=None):
         if type(production_mode) is not bool:
             raise ValueError("production mode")
         self.production_mode = production_mode
@@ -179,6 +179,10 @@ class Gateway:
         self.phone_snapshot, self.record_phone, self.wall_clock = phone_snapshot, record_phone, wall_clock
         self.core_boot, self.query_phone, self.native_target = core_boot, query_phone, native_target
         self.handoff_enabled = core_boot is not None and query_phone is not None
+        if correct_history is not None and not callable(correct_history):
+            raise ValueError("history correction callback required")
+        self.correct_history = correct_history
+        self.history_correction = self.history_correction_receipt = None
         self.native_boot = None
         self.phone_pending = self.phone_baseline = self.latest_verified_phone = None
         self.handoff = self.handoff_receipt = None
@@ -271,6 +275,19 @@ class Gateway:
                         raise ValueError("handoff receipt")
                 if self.native_boot is not None and not self._return_id(self.native_boot):
                     raise ValueError("native epoch")
+                self.history_correction = state.get("history_correction")
+                self.history_correction_receipt = state.get("history_correction_receipt")
+                if self.history_correction is not None:
+                    if self.correct_history is None:
+                        raise ValueError("history correction capability required")
+                    self._validate_correction(self.history_correction)
+                if self.history_correction_receipt is not None:
+                    receipt = self.history_correction_receipt
+                    if (not isinstance(receipt, dict) or set(receipt) != {"operation_id", "digest", "result"}
+                            or not self._return_id(receipt["operation_id"])
+                            or not re.fullmatch(r"[0-9a-f]{64}", receipt["digest"])
+                            or not isinstance(receipt["result"], dict)):
+                        raise ValueError("history correction receipt")
             if state["version"] == 3 and state.get("scheduled_return") is None:
                 raise ValueError("missing scheduled return")
             if state.get("scheduled_return") is not None:
@@ -330,11 +347,13 @@ class Gateway:
             self.uncertainty_origin, self.pending_custom = "unknown", None
             self.last_custom = self.last_operation = self.last_custom_receipt = None
             self.phone_pending = self.phone_baseline = self.handoff = self.handoff_receipt = None
+            self.history_correction = self.history_correction_receipt = None
 
     def _save(self, *, last_custom, operation, receipt, pending=_UNCHANGED, upstream_uncertain=None):
         uncertain = self.upstream_uncertain if upstream_uncertain is None else upstream_uncertain
         modern = self.handoff_enabled and any(value is not None for value in (
-            self.phone_pending, self.phone_baseline, self.handoff, self.native_boot))
+            self.phone_pending, self.phone_baseline, self.handoff, self.native_boot,
+            self.history_correction, self.history_correction_receipt))
         state = {"version": 4 if modern else 3 if self.scheduled_return is not None else 2,
                  "person_id": self.person_id, "mode": "custom",
                  "last_custom": last_custom, "operation": operation,
@@ -347,7 +366,9 @@ class Gateway:
             state.update(scheduled_return=self.scheduled_return, return_receipt=self.return_receipt)
         if modern:
             state.update(phone_pending=self.phone_pending, phone_baseline=self.phone_baseline,
-                         native_boot=self.native_boot, handoff=self.handoff, handoff_receipt=self.handoff_receipt)
+                         native_boot=self.native_boot, handoff=self.handoff, handoff_receipt=self.handoff_receipt,
+                         history_correction=self.history_correction,
+                         history_correction_receipt=self.history_correction_receipt)
         data = json.dumps(state, allow_nan=False, separators=(",", ":")).encode()
         self.checkpoint_path.parent.mkdir(parents=True, exist_ok=True)
         temporary = self.checkpoint_path.with_name(self.checkpoint_path.name + ".tmp")
@@ -421,6 +442,13 @@ class Gateway:
 
     async def _recover_tick(self):
         self._expire_return()
+        if self.history_correction is not None:
+            async with self.lock:
+                try:
+                    await self._finish_history_correction()
+                except Exception:
+                    pass  # Keep the exact journal ahead of every replay/handoff.
+            return
         if self._return_dirty or self._handoff_dirty:
             async with self.lock:
                 self._save_return()  # Preserve any phone/own marker already owned by the writer.
@@ -475,7 +503,7 @@ class Gateway:
 
     def _mode(self):
         self._expire_return()
-        if self.upstream_uncertain:
+        if self.upstream_uncertain or self.history_correction is not None:
             return "custom"
         if self.mode == "warmup" and self.normal_after is not None and self.clock() >= self.normal_after:
             self.mode = "normal"
@@ -535,6 +563,8 @@ class Gateway:
                 "scheduled_return_supported": True,
                 "scheduled_return": dict(self.scheduled_return) if self.scheduled_return is not None else None,
                 "handoff_supported": self.handoff_enabled,
+                "history_correction_supported": self.handoff_enabled and self.correct_history is not None,
+                "history_correction_pending": self.history_correction is not None,
                 "handoff": {key: self.handoff[key] for key in ("id", "state")} if self.handoff else None,
                 "phone_phase": self.phone_pending.get("phase") if self.phone_pending else None}
 
@@ -761,6 +791,8 @@ class Gateway:
                 "operation_id": result["operation_id"]}
 
     async def _freeze_handoff(self, *, candidate=None, key=None):
+        if self.history_correction is not None:
+            raise RuntimeError("history correction pending")
         if self._handoff_pending():
             return await self._finish_handoff()
         candidate = candidate if candidate is not None else await self._phone_candidate()
@@ -824,6 +856,12 @@ class Gateway:
         return {"key": key, "digest": hashlib.sha256(json.dumps(point, sort_keys=True).encode()).hexdigest()}
 
     def _begin_native(self, *, point=None, operation=None, recovery=False):
+        if self.history_correction is not None:
+            correction = self.history_correction
+            plan = correction["plan"]
+            if (plan is None or point != plan["target"]["point"] or operation != self._operation(
+                    "correction_" + correction["digest"], point)):
+                raise RuntimeError("history correction owns native writer")
         if self.upstream_uncertain and not (recovery and self._recoverable()
                 and self.pending_custom["point"] == point and self.pending_custom["operation"] == operation):
             raise RuntimeError("upstream reconciliation required")
@@ -943,7 +981,7 @@ class Gateway:
 
     async def recover_pending_custom(self):
         async with self.lock:
-            if not self._recoverable():
+            if self.history_correction is not None or not self._recoverable():
                 return None
             self._fail_native()
             self.recovery_active = True
@@ -968,6 +1006,8 @@ class Gateway:
 
     async def replay_last_custom(self):
         async with self.lock:
+            if self.history_correction is not None:
+                return None
             if self.handoff_enabled and (self.phone_pending or self.phone_baseline or self._handoff_pending()):
                 try:
                     return await self._freeze_handoff()
@@ -996,8 +1036,13 @@ class Gateway:
         if not self._authorized(request):
             return web.json_response({"error": "control authentication required"}, status=401)
         if request.path in {"/health", "/control/status"} and request.method == "GET":
-            await self._ensure_source_session()
+            if self.history_correction is None:
+                await self._ensure_source_session()
             return web.json_response(self._status())
+        if request.path == "/control/history-correction":
+            return await self._control_history_correction(request)
+        if self.history_correction is not None:
+            return web.json_response({"error": "history correction pending", **self._status()}, status=503)
         if request.path in {"/control/handoff", "/control/handoff/ack"}:
             return await self._control_handoff(request)
         if self._handoff_pending() or self._handoff_dirty:
@@ -1024,6 +1069,8 @@ class Gateway:
         if self.recovery_active or self._recoverable() or (request.path == "/control/normal" and self.upstream_uncertain):
             return web.json_response({"error": "own recovery pending or upstream uncertain", **self._status()}, status=503)
         async with self.lock:
+            if self.history_correction is not None:
+                return web.json_response({"error": "history correction pending", **self._status()}, status=503)
             if self.upstream_uncertain:
                 self._fail_native()
                 return web.json_response({"error": "upstream reconciliation required", **self._status()}, status=503)
@@ -1083,6 +1130,173 @@ class Gateway:
             self._complete_custom(point, operation, receipt)
             return web.json_response({"receipt": receipt, "idempotent": False})
 
+    def _validate_correction_plan(self, value, operation_id):
+        if (not isinstance(value, dict) or value.get("operation_id") != operation_id
+                or not isinstance(value.get("plan_id"), str)
+                or not re.fullmatch(r"[0-9a-f]{64}", value["plan_id"])):
+            raise ValueError("history correction plan")
+        target = value.get("target")
+        if (not isinstance(target, dict) or set(target) != {
+                "kind", "point", "binding", "history_id", "native_timestamp"}
+                or target["kind"] not in {"phone", "own", "unchanged"}):
+            raise ValueError("history correction target")
+        point = target["point"]
+        if (not isinstance(point, dict) or point.get("person_id") != self.person_id
+                or _point({k: v for k, v in point.items() if k != "person_id"}, self.person_id) != point):
+            raise ValueError("history correction point")
+        self._native_time(target["native_timestamp"])
+        if target["binding"] is not None:
+            self._validate_binding(target["binding"])
+            if not self._return_id(target["history_id"]):
+                raise ValueError("history correction history identity")
+        elif target["history_id"] is not None or target["kind"] == "phone":
+            raise ValueError("history correction binding required")
+        if target["kind"] == "own" and (target["binding"] is not None or point["gps_accuracy"] != 0):
+            raise ValueError("history correction own fallback")
+        return {"operation_id": operation_id, "plan_id": value["plan_id"], "target": target}
+
+    def _validate_correction(self, value):
+        if (not isinstance(value, dict) or set(value) != {"request", "digest", "core_boot", "plan"}
+                or not isinstance(value["request"], dict)
+                or set(value["request"]) != {"operation_id", "preview_token", "source_session"}
+                or any(not self._return_id(item) for item in value["request"].values())
+                or value["digest"] != self._request_digest(value["request"])
+                or not self._return_id(value["core_boot"])):
+            raise ValueError("history correction journal")
+        if value["plan"] is not None:
+            self._validate_correction_plan(value["plan"], value["request"]["operation_id"])
+
+    async def _finish_history_correction(self):
+        """The native writer lock always encloses HA's exact delete journal."""
+        correction = self.history_correction
+        if correction is None:
+            return None
+        self._save_return()  # A prior failed fsync must not permit the first callback.
+        body = {**correction["request"], "core_boot": correction["core_boot"]}
+        plan = correction["plan"]
+        if plan is None:
+            value = await self.correct_history({**body, "phase": "prepare"})
+            if (isinstance(value, dict) and set(value) == {"operation_id", "rejected", "error_code"}
+                    and value["operation_id"] == body["operation_id"] and value["rejected"] is True
+                    and self._return_id(value["error_code"])):
+                # HA proved this exact operation never acquired a delete journal.
+                self.history_correction = None
+                try:
+                    self._save_return()
+                except BaseException:
+                    self.history_correction = correction
+                    raise
+                return value
+            plan = self._validate_correction_plan(value, body["operation_id"])
+            if isinstance(value.get("result"), dict) and value["result"].get("completed") is True:
+                # An older completed operation may be retried after newer GPS or
+                # another deletion. Its historical target must never be replayed.
+                self.history_correction = None
+                try:
+                    self._save_return()
+                except BaseException:
+                    self.history_correction = correction
+                    raise
+                return value["result"]
+            correction = {**correction, "plan": plan}
+            self.history_correction = correction
+            self._save_return()  # The selected target cannot change after this point.
+        target, point = plan["target"], plan["target"]["point"]
+        native_receipt = None
+        if target["kind"] != "unchanged":
+            operation = self._operation("correction_" + correction["digest"], point)
+            if self.upstream_uncertain:
+                if (not self._recoverable() or self.pending_custom["point"] != point
+                        or self.pending_custom["operation"] != operation):
+                    raise RuntimeError("history correction native outcome unknown")
+                # Only a correlated closed native RPC is retryable. A snapshot
+                # alone cannot discharge a disconnected writer still in flight.
+                if await self.verify_native(dict(point)):
+                    native_receipt = await self._finish_custom(point, recovery=True)
+                else:
+                    native_receipt = await self._publish_custom(point, operation, recovery=True)
+            else:
+                native_receipt = await self._publish_custom(point, operation)
+        elif self.upstream_uncertain:
+            raise RuntimeError("history correction native outcome unknown")
+        if not await self.verify_native(dict(point)):
+            raise RuntimeError("history correction native verification failed")
+        value = await self.correct_history({**body, "phase": "commit", "plan_id": plan["plan_id"]})
+        if (self._validate_correction_plan(value, body["operation_id"]) != plan
+                or not isinstance(value.get("result"), dict) or value["result"].get("completed") is not True):
+            raise RuntimeError("history correction acknowledgment invalid")
+        old_baseline, old_latest, old_receipt = self.phone_baseline, self.latest_verified_phone, self.last_phone_receipt
+        old_correction_receipt = self.history_correction_receipt
+        if target["kind"] != "unchanged":
+            self.phone_baseline = target["binding"]
+            self.latest_verified_phone = None
+            self.last_phone_receipt = ({**self._receipt("phone"), "history_id": target["history_id"],
+                "native_timestamp": target["native_timestamp"], "grant": target["binding"]["grant"]}
+                if target["binding"] is not None else None)
+        self.history_correction_receipt = {"operation_id": body["operation_id"],
+                                          "digest": correction["digest"], "result": value["result"]}
+        self.history_correction = None
+        try:
+            if target["kind"] == "own":
+                self._commit_native(point=point, operation=operation, receipt=native_receipt)
+            else:
+                self._commit_native()
+        except BaseException:
+            self.history_correction = correction
+            self.history_correction_receipt = old_correction_receipt
+            self.phone_baseline, self.latest_verified_phone, self.last_phone_receipt = old_baseline, old_latest, old_receipt
+            raise
+        if target["kind"] == "own":
+            self.last_custom, self.last_operation, self.last_custom_receipt = point, operation, native_receipt
+        # Never restore a captured Normal grant: a scheduled return can expire
+        # while any awaited prepare/publication/commit is in progress.
+        self._expire_return()
+        return value["result"]
+
+    async def _control_history_correction(self, request):
+        if request.method != "POST":
+            return web.json_response({"error": "unsupported control"}, status=405)
+        body = await self._read_json(request)
+        if (not isinstance(body, dict) or set(body) != {"operation_id", "preview_token", "source_session"}
+                or any(not self._return_id(value) for value in body.values())):
+            raise ValueError("history correction schema")
+        digest = self._request_digest(body)
+        def rejected(error_code):
+            return web.json_response({"result": {"operation_id": body["operation_id"],
+                "rejected": True, "error_code": error_code}, **self._status()})
+        async with self.lock:
+            receipt = self.history_correction_receipt
+            if receipt is not None and receipt["operation_id"] == body["operation_id"]:
+                if receipt["digest"] != digest:
+                    return web.json_response({"error": "idempotency conflict"}, status=409)
+                return web.json_response({"result": receipt["result"], **self._status()})
+            if self.history_correction is not None:
+                if self.history_correction["digest"] != digest:
+                    return web.json_response({"error": "history correction pending"}, status=409)
+            else:
+                # No journal for this operation exists. An explicit rejection lets
+                # HA release its reservation without treating a timeout as proof.
+                if not self.handoff_enabled or self.correct_history is None:
+                    return rejected("history_correction_unavailable")
+                if (self._mode() != "normal" or self.upstream_uncertain or self.replay_required
+                        or self._handoff_pending() or self._handoff_dirty or self.phone_pending
+                        or not await self._ensure_source_session() or body["source_session"] != self.source_session):
+                    return rejected("history_source_unconfirmed")
+                boot = await self.core_boot()
+                if self._mode() != "normal" or body["source_session"] != self.source_session:
+                    return rejected("history_source_unconfirmed")
+                self.history_correction = {"request": body, "digest": digest, "core_boot": boot, "plan": None}
+                self._save_return()
+            try:
+                result = await self._finish_history_correction()
+            except (Exception, asyncio.CancelledError) as error:
+                # Keep the live grant intact but admission blocked by the journal.
+                # This operation owns any pending native intent until final fsync.
+                if isinstance(error, asyncio.CancelledError):
+                    raise
+                return web.json_response({"error": "history correction pending", **self._status()}, status=503)
+            return web.json_response({"result": result, **self._status()})
+
     async def _control_handoff(self, request):
         if not self.handoff_enabled:
             return web.json_response({"error": "handoff unavailable"}, status=503)
@@ -1108,6 +1322,8 @@ class Gateway:
         if not ack:
             self._fail_native()
         async with self.lock:
+            if self.history_correction is not None:
+                return web.json_response({"error": "history correction pending", **self._status()}, status=503)
             if self.source_control_check is not None and not await self.source_control_check(body["source_session"]):
                 return web.json_response({"error": "source control session unavailable"}, status=503)
             current = self.handoff["id"] if self.handoff else None
@@ -1138,6 +1354,8 @@ class Gateway:
 
     async def legacy_barrier(self, checkpoint_sha256, core_boot, target):
         """Called only by the one-shot authenticated manager after its stopped-Core proof."""
+        if self.history_correction is not None:
+            raise ValueError("history correction pending")
         if (self.handoff is not None and self.handoff.get("key") == "legacy_barrier_" + checkpoint_sha256
                 and await self.core_boot() == core_boot):
             if (not isinstance(target, dict) or self.handoff["native_timestamp"] != target.get("timestamp")
@@ -1181,6 +1399,8 @@ class Gateway:
         digest = hashlib.sha256(json.dumps({"ack": ack, "at": at, "expected_id": body["expected_id"]},
                                            sort_keys=True).encode()).hexdigest()
         async with self.lock:
+            if self.history_correction is not None:
+                return web.json_response({"error": "history correction pending", **self._status()}, status=503)
             if self.source_control_check is not None and not await self.source_control_check(body["source_session"]):
                 return web.json_response({"error": "source control session unavailable"}, status=503)
             self._expire_return()
@@ -1401,7 +1621,8 @@ class Gateway:
         except (ValueError, UnicodeError, TypeError, KeyError):
             return web.json_response({"error": "invalid or unsupported input"}, status=400)
         except (Exception, asyncio.CancelledError) as error:
-            self._fail_native()
+            if request.path != "/control/history-correction" or self.history_correction is None:
+                self._fail_native()
             if isinstance(error, asyncio.CancelledError):
                 raise
             return web.json_response({"error": "gateway operation failed"}, status=503)

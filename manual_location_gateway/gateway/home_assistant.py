@@ -174,6 +174,15 @@ class NativeHooks:
         return {"point": point, "snapshots": snapshots,
                 "native_timestamp": person.get("last_updated"), "operation_id": None}
 
+    async def correct_history(self, payload):
+        if self.history_key is None:
+            raise RuntimeError("history correction authentication unavailable")
+        async with self.client.post(self.base_url + "/api/manual_location/gateway_history/correct",
+                                    json={**payload, "gateway_key": self.history_key}) as response:
+            if response.status != 200:
+                raise RuntimeError("history correction rejected")
+            return await response.json()
+
     def checkpoint_disk(self, point):
         # Read the file HA created. Never construct or edit its contents here.
         if self.fault_enabled("native_disk_sync"):
