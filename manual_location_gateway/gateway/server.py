@@ -153,7 +153,8 @@ class Gateway:
                  production_mode=False, max_ws_message_bytes=None, backend_ssl_server_hostname=None,
                  denied_webhooks=(), allowed_push_url=None, registration_guard=None, backend_ssl_context=None,
                  phone_snapshot=None, record_phone=None, wall_clock=time.time,
-                 core_boot=None, query_phone=None, native_target=None, correct_history=None):
+                 core_boot=None, query_phone=None, native_target=None, correct_history=None,
+                 normal_intent_check=None):
         if type(production_mode) is not bool:
             raise ValueError("production mode")
         self.production_mode = production_mode
@@ -183,6 +184,14 @@ class Gateway:
             raise ValueError("history correction callback required")
         self.correct_history = correct_history
         self.history_correction = self.history_correction_receipt = None
+        if normal_intent_check is not None and not callable(normal_intent_check):
+            raise ValueError("normal intent callback required")
+        self.normal_intent_check = normal_intent_check
+        # Consent belongs to this process only. Never include these in _save.
+        self.resume_entitlement = None
+        self.used_normal_intents = set()
+        self.suspended, self.suspend_reason = False, None
+        self.admission_generation = 0
         self.native_boot = None
         self.phone_pending = self.phone_baseline = self.latest_verified_phone = None
         self.handoff = self.handoff_receipt = None
@@ -449,6 +458,8 @@ class Gateway:
                 except Exception:
                     pass  # Keep the exact journal ahead of every replay/handoff.
             return
+        if self.suspended and self.resume_entitlement is not None:
+            return  # A read/session outage is not an instruction to publish Own.
         if self._return_dirty or self._handoff_dirty:
             async with self.lock:
                 self._save_return()  # Preserve any phone/own marker already owned by the writer.
@@ -514,23 +525,26 @@ class Gateway:
         return hmac.compare_digest(request.headers.get("Authorization", ""), expected)
 
     async def _ensure_source_session(self):
+        expected = self._admission_identity()
         if self.mode in {"warmup", "normal"} and not await self._ensure_registration():
             return False
-        if self.source_session_check is None:
+        if expected != self._admission_identity():
+            return False
+        if self.source_session_check is None and self.resume_entitlement is None:
             return True  # Standalone lab compatibility; integrated runtime supplies a check.
         if self.mode not in {"warmup", "normal"}:
             return False
         try:
-            valid = bool(self.source_session and await self.source_session_check(self.source_session))
+            valid = bool(self.source_session and (self.source_session_check is None
+                         or await self.source_session_check(self.source_session)))
+            if valid and self.resume_entitlement is not None:
+                valid = await self.normal_intent_check(self.resume_entitlement["intent_id"], self.source_session) is True
         except Exception:
             valid = False
+        if expected != self._admission_identity():
+            return False
         if not valid:
-            self.mode, self.normal_after, self.source_session = "custom", None, None
-            self.normal_operations.clear()
-            self.last_phone_receipt = None
-            self.normal_grant = self.proven_phone = None
-            # Revoke admission only. A queued replay of an older own point could
-            # otherwise create extra zone transitions before the latest Store target.
+            self._suspend_native("source_session_unavailable")
         return valid
 
     async def _ensure_registration(self):
@@ -541,7 +555,7 @@ class Gateway:
         except Exception:
             valid = False
         if not valid:
-            self._fail_native()
+            self._fail_native(reason="registration_changed")
             self.normal_operations.clear()
         return valid
 
@@ -551,7 +565,9 @@ class Gateway:
                         and self.last_custom_receipt.get("origin") == "custom"
                         and self.last_custom_receipt.get("person_id") == self.person_id)
         return {"mode": self._mode(), "person_id": self.person_id,
-                "remaining_seconds": max(0, self.normal_after - self.clock()) if self._mode() == "warmup" else 0,
+                "remaining_seconds": (max(0, self.resume_entitlement["deadline"] - self.clock())
+                    if self.suspended and self.resume_entitlement else
+                    max(0, self.normal_after - self.clock()) if self._mode() == "warmup" else 0),
                 "last_custom_receipt": self.last_custom_receipt,
                 "last_phone_receipt": self.last_phone_receipt,
                 "replay_required": self.replay_required or self._handoff_dirty,
@@ -565,6 +581,10 @@ class Gateway:
                 "handoff_supported": self.handoff_enabled,
                 "history_correction_supported": self.handoff_enabled and self.correct_history is not None,
                 "history_correction_pending": self.history_correction is not None,
+                "resume_supported": self.handoff_enabled and self.normal_intent_check is not None,
+                "resume_intent_id": self.resume_entitlement["intent_id"] if self.resume_entitlement else None,
+                "suspended": self.suspended,
+                "suspend_reason": self.suspend_reason,
                 "handoff": {key: self.handoff[key] for key in ("id", "state")} if self.handoff else None,
                 "phone_phase": self.phone_pending.get("phase") if self.phone_pending else None}
 
@@ -578,10 +598,12 @@ class Gateway:
 
     def _begin_phone(self, expected=None):
         if (self._mode() != "normal" or self._expire_return()
-                or (expected is not None and expected != (self.normal_grant, self.source_session))):
+                or (expected is not None and expected != self._admission_identity())):
             return None
         admission = {"grant": self.normal_grant, "source_session": self.source_session,
                      "lower": self.wall_clock(), "monotonic": self.clock()}
+        if self.resume_entitlement is not None:
+            admission["intent_id"] = self.resume_entitlement["intent_id"]
         if self.handoff_enabled:
             admission.update(operation_id=uuid.uuid4().hex, core_boot=self.native_boot)
             self.phone_pending = {key: admission[key] for key in ("operation_id", "grant", "source_session", "core_boot")}
@@ -667,7 +689,7 @@ class Gateway:
         self._expire_return()
 
     async def _prepare_phone(self):
-        expected = (self.normal_grant, self.source_session)
+        expected = self._admission_identity()
         if self.handoff_enabled:
             self.native_boot = await self.core_boot()
         return expected
@@ -738,6 +760,8 @@ class Gateway:
                          "operation_id": admission["operation_id"]}
             self.latest_verified_phone = candidate
             payload = {key: admission[key] for key in ("operation_id", "grant", "source_session", "core_boot")}
+            if "intent_id" in admission:
+                payload["intent_id"] = admission["intent_id"]
             payload.update(point=dict(point), snapshots=snapshots, lower=lower, upper=upper, elapsed=elapsed)
             binding = {**self.phone_pending, "request_digest": self._request_digest(payload)}
             self.phone_pending = binding
@@ -914,7 +938,28 @@ class Gateway:
                    receipt=self.last_custom_receipt, pending=pending)
         self.pending_custom = pending
 
-    def _fail_native(self):
+    def _admission_identity(self):
+        return (self.normal_grant, self.source_session, self.admission_generation,
+                self.resume_entitlement["intent_id"] if self.resume_entitlement else None)
+
+    def _revoke_resume(self, reason=None):
+        self.resume_entitlement = None
+        self.suspended, self.suspend_reason = False, reason
+        self.admission_generation += 1
+
+    def _suspend_native(self, reason):
+        if (self.resume_entitlement is None or self.upstream_uncertain or self.phone_pending
+                or self.replay_required or self._handoff_pending()):
+            self._fail_native()
+            return
+        self.suspended, self.suspend_reason = True, reason
+        self.admission_generation += 1
+        self.mode, self.normal_after, self.last_phone_receipt = "custom", None, None
+        self.source_session = self.normal_grant = self.proven_phone = None
+        self.normal_operations.clear()
+
+    def _fail_native(self, *, reason=None):
+        self._revoke_resume(reason or ("native_outcome_unknown" if self.upstream_uncertain else None))
         self.mode, self.normal_after, self.last_phone_receipt = "custom", None, None
         self.source_session = None
         self.normal_grant = self.proven_phone = None
@@ -1006,7 +1051,7 @@ class Gateway:
 
     async def replay_last_custom(self):
         async with self.lock:
-            if self.history_correction is not None:
+            if self.history_correction is not None or (self.suspended and self.resume_entitlement is not None):
                 return None
             if self.handoff_enabled and (self.phone_pending or self.phone_baseline or self._handoff_pending()):
                 try:
@@ -1043,6 +1088,8 @@ class Gateway:
             return await self._control_history_correction(request)
         if self.history_correction is not None:
             return web.json_response({"error": "history correction pending", **self._status()}, status=503)
+        if request.path == "/control/resume":
+            return await self._control_resume(request)
         if request.path in {"/control/handoff", "/control/handoff/ack"}:
             return await self._control_handoff(request)
         if self._handoff_pending() or self._handoff_dirty:
@@ -1057,8 +1104,11 @@ class Gateway:
         if request.method != "POST" or request.path not in {"/control/custom", "/control/normal"}:
             return web.json_response({"error": "unsupported control"}, status=405)
         body = await self._read_json(request)
-        if not isinstance(body, dict) or set(body) - {"idempotency_key", "point", "source_session", "expected_id"}:
+        if not isinstance(body, dict) or set(body) - {"idempotency_key", "point", "source_session", "expected_id", "intent_id"}:
             raise ValueError("control schema")
+        intent_id = body.get("intent_id")
+        if "intent_id" in body and (request.path != "/control/normal" or not self._return_id(intent_id)):
+            raise ValueError("normal intent schema")
         if "expected_id" in body and body["expected_id"] is not None and not self._return_id(body["expected_id"]):
             raise ValueError("scheduled return generation")
         if request.path != "/control/normal" and "expected_id" in body:
@@ -1066,6 +1116,26 @@ class Gateway:
         key = body.get("idempotency_key")
         if not isinstance(key, str) or not re.fullmatch(r"[A-Za-z0-9_-]{1,128}", key):
             raise ValueError("idempotency key required")
+        if request.path == "/control/custom":
+            # A delayed request from an obsolete HA session must not revoke new
+            # consent. Validate the control epoch before revoking, outside the writer.
+            if self.source_control_check is not None:
+                source_session = body.get("source_session")
+                if not self._return_id(source_session):
+                    raise ValueError("source control session required")
+                control_generation = self.admission_generation
+                try:
+                    valid = await self.source_control_check(source_session)
+                except Exception:
+                    if control_generation != self.admission_generation:
+                        return web.json_response({"error": "custom consent changed", **self._status()}, status=409)
+                    raise
+                if control_generation != self.admission_generation:
+                    return web.json_response({"error": "custom consent changed", **self._status()}, status=409)
+                if not valid:
+                    return web.json_response({"error": "source control session unavailable", **self._status()}, status=503)
+            self._fail_native()
+        request_generation = self.admission_generation
         if self.recovery_active or self._recoverable() or (request.path == "/control/normal" and self.upstream_uncertain):
             return web.json_response({"error": "own recovery pending or upstream uncertain", **self._status()}, status=503)
         async with self.lock:
@@ -1077,6 +1147,15 @@ class Gateway:
             if request.path == "/control/normal":
                 if "point" in body:
                     raise ValueError("normal schema")
+                if request_generation != self.admission_generation:
+                    return web.json_response({"error": "normal consent changed", **self._status()}, status=409)
+                active_intent = self.resume_entitlement["intent_id"] if self.resume_entitlement else None
+                if (intent_id in self.used_normal_intents and (
+                        intent_id != active_intent or key != self.normal_grant)
+                        or key in self.normal_operations and intent_id != active_intent):
+                    return web.json_response({"error": "normal intent cannot be reused", **self._status()}, status=409)
+                if intent_id is not None and (not self.handoff_enabled or self.normal_intent_check is None):
+                    return web.json_response({"error": "normal intent unsupported", **self._status()}, status=503)
                 if not await self._ensure_registration():
                     return web.json_response({"error": "registration changed or unavailable", **self._status()}, status=503)
                 source_session = body.get("source_session")
@@ -1088,8 +1167,15 @@ class Gateway:
                         return web.json_response({"error": "source session unavailable", **self._status()}, status=503)
                     if key in self.normal_operations and source_session != self.source_session:
                         return web.json_response({"error": "normal session conflict"}, status=409)
+                if intent_id is not None:
+                    if not self._return_id(source_session):
+                        raise ValueError("normal source session required")
+                    if await self.normal_intent_check(intent_id, source_session, opening=True) is not True:
+                        return web.json_response({"error": "normal intent unavailable", **self._status()}, status=503)
                 # Validation above awaits HA; expiry/CAS must be checked again afterwards.
                 self._expire_return()
+                if request_generation != self.admission_generation:
+                    return web.json_response({"error": "normal consent changed", **self._status()}, status=409)
                 if self._return_dirty:
                     return web.json_response({"error": "scheduled return persistence pending", **self._status()}, status=503)
                 expected = self.scheduled_return["id"] if self.scheduled_return is not None else None
@@ -1097,11 +1183,16 @@ class Gateway:
                         self.scheduled_return is not None and self.scheduled_return["state"] in {"due", "applied"})):
                     return web.json_response({"error": "scheduled return changed", **self._status()}, status=409)
                 if key not in self.normal_operations:
+                    self._revoke_resume()
                     self.mode, self.normal_after = "warmup", self.clock() + self.warmup_seconds
                     self.source_session = source_session
                     self.last_phone_receipt = None
                     self.normal_grant, self.proven_phone = key, None
                     self.normal_operations[key] = self.normal_after
+                    if intent_id is not None:
+                        self.used_normal_intents.add(intent_id)
+                        self.resume_entitlement = {"intent_id": intent_id, "deadline": self.normal_after,
+                                                   "sessions": {source_session}, "grants": {key}}
                 return web.json_response(self._status(), status=202)
             if self.source_control_check is not None:
                 source_session = body.get("source_session")
@@ -1129,6 +1220,53 @@ class Gateway:
             receipt = await self._publish_custom(point, operation)
             self._complete_custom(point, operation, receipt)
             return web.json_response({"receipt": receipt, "idempotent": False})
+
+    async def _control_resume(self, request):
+        if request.method != "POST":
+            return web.json_response({"error": "unsupported control"}, status=405)
+        body = await self._read_json(request)
+        if (not isinstance(body, dict) or set(body) != {"intent_id", "idempotency_key", "source_session", "expected_id"}
+                or any(not self._return_id(body[key]) for key in ("intent_id", "idempotency_key", "source_session"))
+                or body["expected_id"] is not None and not self._return_id(body["expected_id"])):
+            raise ValueError("resume schema")
+        async with self.lock:
+            entitlement, generation = self.resume_entitlement, self.admission_generation
+            def current():
+                self._expire_return()
+                return (entitlement is not None and self.resume_entitlement is entitlement
+                        and generation == self.admission_generation and entitlement["intent_id"] == body["intent_id"]
+                        and body["expected_id"] == (self.scheduled_return["id"] if self.scheduled_return else None)
+                        and not self.upstream_uncertain and not self.history_correction and not self.phone_pending
+                        and not self.replay_required and not self._handoff_pending() and not self._handoff_dirty)
+            if not current() or self.normal_intent_check is None:
+                return web.json_response({"error": "resume consent unavailable", **self._status()}, status=409)
+            repeated = (not self.suspended and self.normal_grant == body["idempotency_key"]
+                        and self.source_session == body["source_session"])
+            if not repeated and (not self.suspended or body["source_session"] in entitlement["sessions"]
+                                 or body["idempotency_key"] in entitlement["grants"]):
+                return web.json_response({"error": "fresh resume grant and session required", **self._status()}, status=409)
+            try:
+                if not await self._ensure_registration() or not current():
+                    return web.json_response({"error": "resume registration unavailable", **self._status()}, status=503)
+                valid = await self.normal_intent_check(body["intent_id"], body["source_session"], opening=True)
+                if not current() or valid is not True:
+                    return web.json_response({"error": "resume intent unavailable", **self._status()}, status=409)
+                boot = await self.core_boot()
+                if not current() or not self._return_id(boot):
+                    return web.json_response({"error": "resume consent changed", **self._status()}, status=409)
+            except Exception:
+                return web.json_response({"error": "resume validation unavailable", **self._status()}, status=503)
+            if not repeated:
+                self.admission_generation += 1
+                self.suspended, self.suspend_reason = False, None
+                self.normal_after = entitlement["deadline"]
+                self.mode = "normal" if self.clock() >= self.normal_after else "warmup"
+                self.source_session, self.normal_grant = body["source_session"], body["idempotency_key"]
+                self.native_boot, self.proven_phone = boot, None
+                self.normal_operations = {self.normal_grant: self.normal_after}
+                entitlement["sessions"].add(self.source_session)
+                entitlement["grants"].add(self.normal_grant)
+            return web.json_response(self._status(), status=202)
 
     def _validate_correction_plan(self, value, operation_id):
         if (not isinstance(value, dict) or value.get("operation_id") != operation_id
@@ -1310,8 +1448,18 @@ class Gateway:
                 or not self._return_id(body["source_session"]) or not self._return_id(body["idempotency_key"])
                 or (body["expected_id"] is not None and not self._return_id(body["expected_id"]))):
             raise ValueError("handoff schema")
-        if self.source_control_check is not None and not await self.source_control_check(body["source_session"]):
-            return web.json_response({"error": "source control session unavailable"}, status=503)
+        control_generation = self.admission_generation
+        if self.source_control_check is not None:
+            try:
+                valid = await self.source_control_check(body["source_session"])
+            except Exception:
+                if control_generation != self.admission_generation:
+                    return web.json_response({"error": "handoff consent changed", **self._status()}, status=409)
+                raise
+            if control_generation != self.admission_generation:
+                return web.json_response({"error": "handoff consent changed", **self._status()}, status=409)
+            if not valid:
+                return web.json_response({"error": "source control session unavailable"}, status=503)
         current = self.handoff["id"] if self.handoff else None
         retry = (self._handoff_pending() and self.handoff.get("key") == body["idempotency_key"])
         previous = self.handoff_receipt
@@ -1579,6 +1727,8 @@ class Gateway:
                     return web.json_response({"error": "unprotected registration denied"}, status=403)
                 if request.method not in {"POST", "PUT"}:
                     return web.json_response({"error": "method denied"}, status=405)
+                ingress_generation = self.admission_generation
+                ingress_allowed = self._mode() == "normal"
                 supplied = await self._read_json(request)
                 if registration_id != self.webhook_id:
                     status, data, headers = await self._http_forward(request, supplied, registration_id=registration_id)
@@ -1589,7 +1739,8 @@ class Gateway:
                         await self._ensure_source_session()
                     if kind == "registration" and not await self._ensure_registration():
                         return web.json_response({"error": "registration changed or unavailable"}, status=503)
-                    if kind == "blocked" or (kind == "location" and self._mode() != "normal"):
+                    if kind == "blocked" or (kind == "location" and (self._mode() != "normal"
+                            or not ingress_allowed or ingress_generation != self.admission_generation)):
                         return web.json_response({} if self.production_mode else {"blocked": True, "mode": self._mode()})
                     if kind == "location":
                         expected = await self._prepare_phone()
@@ -1616,13 +1767,13 @@ class Gateway:
         except ClientError:
             # TLS certificate errors also inherit ValueError; they are upstream
             # failures, never malformed phone input or grounds to keep a grant.
-            self._fail_native()
+            self._suspend_native("transport_unavailable")
             return web.json_response({"error": "gateway operation failed"}, status=503)
         except (ValueError, UnicodeError, TypeError, KeyError):
             return web.json_response({"error": "invalid or unsupported input"}, status=400)
         except (Exception, asyncio.CancelledError) as error:
             if request.path != "/control/history-correction" or self.history_correction is None:
-                self._fail_native()
+                self._suspend_native("transport_unavailable")
             if isinstance(error, asyncio.CancelledError):
                 raise
             return web.json_response({"error": "gateway operation failed"}, status=503)
@@ -1681,8 +1832,9 @@ class Gateway:
                             commands = commands if isinstance(commands, list) else [commands]
                             if not commands:
                                 raise ValueError("empty batch")
+                            ingress = (self.admission_generation, self._mode() == "normal")
                             for command in commands:
-                                await self._ws_command(command, downstream, upstream, pending)
+                                await self._ws_command(command, downstream, upstream, pending, ingress=ingress)
                         except (ValueError, TypeError, KeyError):
                             await downstream.close(code=1007)
                             break
@@ -1691,13 +1843,13 @@ class Gateway:
                     with contextlib.suppress(asyncio.CancelledError):
                         await receiver
         except (Exception, asyncio.CancelledError) as error:
-            self._fail_native()
+            self._suspend_native("transport_unavailable")
             if isinstance(error, asyncio.CancelledError):
                 raise
             await downstream.close(code=1011)
         return downstream
 
-    async def _ws_command(self, command, downstream, upstream, pending):
+    async def _ws_command(self, command, downstream, upstream, pending, *, ingress):
         if not isinstance(command, dict):
             raise ValueError("command schema")
         kind, identifier = command.get("type"), command.get("id")
@@ -1733,12 +1885,14 @@ class Gateway:
                 return await denied()
             supplied = _json(raw_body)
             category, body, point = self._classify(supplied) if registration_id == self.webhook_id else ("passthrough", supplied, None)
+            ingress_generation, ingress_allowed = ingress
             async with self.lock:
                 if category == "location":
                     await self._ensure_source_session()
                 if category == "registration" and not await self._ensure_registration():
                     return await denied()
-                if category == "blocked" or (category == "location" and self._mode() != "normal"):
+                if category == "blocked" or (category == "location" and (self._mode() != "normal"
+                        or not ingress_allowed or ingress_generation != self.admission_generation)):
                     await downstream.send_json({"id": identifier, "type": "result", "success": True,
                         "result": {"status": 200, "body": '{}' if self.production_mode else '{"blocked":true}',
                                    "headers": {"Content-Type": "application/json"}}})

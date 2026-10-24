@@ -69,6 +69,19 @@ class NativeHooks:
     async def check_control_session(self, expected):
         return await self._check_session(expected, control=True)
 
+    async def check_normal_intent(self, intent_id, source_session, *, opening=False):
+        try:
+            async with self.client.get(self.base_url + "/api/manual_location/gateway_session?control=1") as response:
+                if response.status != 200:
+                    return False
+                value = await response.json()
+            return (isinstance(value, dict) and value.get("session") == source_session
+                    and value.get("normal_intent_id") == intent_id and value.get("normal_desired") is True
+                    and (not opening or value.get("resume_ready") is True) and value.get("person_id") == self.person_id
+                    and value.get("tracker_id") == self.tracker_id)
+        except (aiohttp.ClientError, asyncio.TimeoutError, ValueError):
+            return False
+
     async def _check_session(self, expected, *, control):
         try:
             path = "/api/manual_location/gateway_session" + ("?control=1" if control else "")

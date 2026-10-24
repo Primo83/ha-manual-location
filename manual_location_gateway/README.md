@@ -1,5 +1,11 @@
 # Manual Location Gateway
 
+Wersja 2.0.6 z integracją 2.1.2 wznawia wcześniej włączony GPS po restarcie HA lub krótkiej awarii komunikacji, jeśli Gateway działa nieprzerwanie. Zgoda na wznowienie istnieje tylko w pamięci procesu. Custom, wyłączenie i termin powrotu mają pierwszeństwo; niepewny zapis lub zmiana telefonu mogą wymagać ręcznego włączenia po odzyskaniu spójności. Ukończona karencja nie zaczyna się ponownie przy wznowieniu.
+
+Przy aktualizacji zainstaluj App 2.0.6, następnie integrację 2.1.2 i uruchom ponownie HA. Ta instalacja restartuje Gateway, więc GPS włączasz raz świadomie w panelu. Dopiero późniejsze restarty samego HA korzystają z automatycznego wznowienia. Restart całego urządzenia lub Gateway nadal wymaga ponownego wyboru HA GPS. Nie cofaj wersji podczas niedokończonej korekty historii.
+
+## Wcześniejsza zmiana 2.0.5
+
 Wersja 2.0.5 wraz z integracją 2.1.1 pozwala usunąć bieżący punkt podczas HA GPS. Bramka najpierw zapisuje plan korekty, ustawia pozostałą potwierdzoną pozycję w HA i dopiero zamyka usunięcie historii. Kolejne raporty telefonu nadal działają przy poprawnym zakończeniu. Nowy raport przyjęty przed wykonaniem korekty ma pierwszeństwo. Brak bezpiecznego zastępstwa lub nierozstrzygnięta operacja blokuje zmianę.
 
 Aktualizacja App restartuje bramkę i zgodnie z dotychczasową ochroną zamyka GPS. Zainstaluj App 2.0.5, następnie integrację 2.1.1 i wykonaj restart HA. Powrót do HA GPS wymaga świadomego wyboru w panelu. Nie cofaj App podczas niedokończonej korekty; starszy kod nie obsługuje jej dziennika.

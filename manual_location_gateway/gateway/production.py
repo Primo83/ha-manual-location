@@ -380,6 +380,7 @@ class Runtime:
             core_boot=getattr(self.hooks, "core_boot", None), query_phone=getattr(self.hooks, "query_phone", None),
             native_target=getattr(self.hooks, "native_target", None),
             correct_history=getattr(self.hooks, "correct_history", None),
+            normal_intent_check=getattr(self.hooks, "check_normal_intent", None),
             passthrough_webhooks=options.passthrough_webhooks, denied_webhooks=options.denied_webhooks,
             production_mode=True, max_ws_message_bytes=8 * 1024 * 1024,
             backend_ssl_server_hostname=options.public_host,
