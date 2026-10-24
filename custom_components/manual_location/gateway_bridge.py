@@ -48,6 +48,7 @@ class GatewayBridge:
         self.handoff_supported = False
         self.history_correction_supported = False
         self.history_correction_pending = False
+        self.resume_supported = False
 
     def invalidate(self):
         """A delayed normal grant must not survive a later close or failure."""
@@ -152,6 +153,17 @@ class GatewayBridge:
         self.handoff_supported = self.handoff_supported or handoff_supported
         self.history_correction_supported = result.get("history_correction_supported") is True
         self.history_correction_pending = result.get("history_correction_pending") is True
+        resume_supported = result.get("resume_supported", False)
+        resume_intent = result.get("resume_intent_id")
+        suspended, reason = result.get("suspended", False), result.get("suspend_reason")
+        if (type(resume_supported) is not bool or type(suspended) is not bool
+                or (resume_intent is not None and (not resume_supported or not isinstance(resume_intent, str)
+                    or re.fullmatch(r"[A-Za-z0-9_-]{16,128}", resume_intent) is None))
+                or reason not in {None, "source_session_unavailable", "transport_unavailable", "native_outcome_unknown", "registration_changed"}
+                or (suspended and (reason not in {"source_session_unavailable", "transport_unavailable"} or resume_intent is None))
+                or (not suspended and reason in {"source_session_unavailable", "transport_unavailable"})):
+            raise GatewayError("invalid resume status")
+        self.resume_supported = resume_supported
         blocked = self.pending or self.history_correction_pending or result.get("upstream_uncertain") or result.get("replay_required") or result.get("recovery_retryable")
         return {"enabled": True, "available": True, "person_id": self.person_id,
                 "mode": "blocked" if blocked else result["mode"],
@@ -160,6 +172,8 @@ class GatewayBridge:
                 "replay_required": bool(result.get("replay_required")),
                 "upstream_uncertain": bool(result.get("upstream_uncertain")),
                 "recovery_retryable": bool(result.get("recovery_retryable")),
+                "resume_supported": resume_supported, "resume_intent_id": resume_intent,
+                "suspended": suspended, "suspend_reason": reason,
                 "history_correction_supported": self.history_correction_supported,
                 "history_correction_pending": self.history_correction_pending,
                 "has_custom_point": custom is not None,
@@ -174,7 +188,7 @@ class GatewayBridge:
             "idempotency_key": key, "source_session": self.session, "expected_id": expected_id})
         status = self._status(result)
         if not status["handoff"] or status["handoff"]["state"] == "idle":
-            if (status["mode"] != "custom" or not status["gps_blocked"]
+            if (result["mode"] != "custom" or not status["gps_blocked"]
                     or status["replay_required"] or status["recovery_retryable"]):
                 raise GatewayError("handoff unavailable")
             # No phone was admitted after the last explicit Own. The gate has
@@ -239,7 +253,7 @@ class GatewayBridge:
         self.pending = False
         self.ready = True
 
-    async def normal(self, key, *, expected_id=_UNSET):
+    async def normal(self, key, *, expected_id=_UNSET, intent_id=None):
         status = await self.status()
         if not self.ready or self.pending or status["mode"] == "blocked":
             raise GatewayError("gateway recovery pending")
@@ -248,10 +262,26 @@ class GatewayBridge:
         result = await self._request("/control/normal", {
             "idempotency_key": key, "source_session": self.session,
             **({"expected_id": expected_id} if expected_id is not _UNSET else {}),
+            **({"intent_id": intent_id} if intent_id is not None else {}),
         })
         status = self._status(result)
-        if status["mode"] not in {"warmup", "normal"}:
+        if (status["mode"] not in {"warmup", "normal"}
+                or (intent_id is not None and (not status["resume_supported"] or status["resume_intent_id"] != intent_id))):
             raise GatewayError("normal mode unconfirmed")
+
+    async def resume(self, key, intent_id, *, expected_id):
+        if not self.resume_supported or not self.ready or self.pending:
+            raise GatewayError("resume unavailable")
+        session = self.session
+        result = await self._request("/control/resume", {
+            "intent_id": intent_id, "idempotency_key": key,
+            "source_session": session, "expected_id": expected_id,
+        })
+        status = self._status(result)
+        if (self.session != session or status["mode"] not in {"normal", "warmup"}
+                or status["suspended"] or status["resume_intent_id"] != intent_id):
+            raise GatewayError("resume unconfirmed")
+        return status
 
     async def configure_return(self, key, expected_id, at):
         if not self.return_supported or not self.ready or self.pending:

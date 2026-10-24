@@ -143,7 +143,9 @@ class SourceSchedule:
             snapshot["return_schedule"]["journal"] = None
             await self.persist(snapshot)
         events = self.events(future=True)
-        desired = events[0]["at"] if events and (opening or status["mode"] in {"normal", "warmup"}) else None
+        suspended_intent = (status.get("suspended") and owner._normal_intent_valid()
+                            and status.get("resume_intent_id") == owner.data["normal_intent"]["id"])
+        desired = events[0]["at"] if events and (opening or suspended_intent or status["mode"] in {"normal", "warmup"}) else None
         actual_at = plan["at"] if plan and plan["state"] == "armed" else None
         if desired == actual_at:
             return status
@@ -181,9 +183,10 @@ class SourceSchedule:
         person = owner.data["persons"].get(gate.person_id)
         if not person or not person.get("current"):
             raise GatewayError("scheduled custom baseline unavailable")
-        if not person["enabled"]:
+        if not person["enabled"] or owner.data.get("normal_intent") is not None:
             snapshot = deepcopy(owner.data)
             snapshot["persons"][gate.person_id]["enabled"] = True
+            snapshot["normal_intent"] = None
             await self.persist(snapshot)
         await owner._async_gateway_sync()
         status = await gate.status()
@@ -272,6 +275,9 @@ class SourceSchedule:
             if not owner.data["enabled"]:
                 reason = "normal_interrupted"
             elif state["normal"] in {"attempting", "started"}:
+                if (status.get("suspended") and owner._normal_intent_valid()
+                        and status.get("resume_intent_id") == owner.data["normal_intent"]["id"]):
+                    continue
                 if self.normal_session.get(key) == gate.session and status["mode"] in {"warmup", "normal"}:
                     if status["mode"] == "normal":
                         snapshot = deepcopy(owner.data)
@@ -301,6 +307,8 @@ class SourceSchedule:
             # The durable attempting marker is consumed on restart, never replayed.
             snapshot = deepcopy(owner.data)
             snapshot["scenarios"][key]["switch_state"]["normal"] = "attempting"
+            snapshot["persons"][gate.person_id]["enabled"] = False
+            snapshot["normal_intent"] = owner._new_normal_intent() if gate.resume_supported else None
             await self.persist(snapshot)
             operation = gate.key(owner.data["revision"], "route-normal", route["run_id"])
             source_session = gate.session
@@ -309,13 +317,14 @@ class SourceSchedule:
                 if self.conflict(owner.data, datetime.now(UTC), exclude=key):
                     raise GatewayError("normal conflict changed")
                 await owner.location_history.async_own_current()
-                await owner.location_history.begin_normal(operation)
+                intent_id = owner.data["normal_intent"]["id"] if owner.data.get("normal_intent") else None
+                await owner.location_history.begin_normal(operation, intent_id=intent_id)
                 plan = status.get("scheduled_return")
                 self.check_normal_consent(key, route["run_id"], source_session, final_at)
                 remaining = 30 - (datetime.now(UTC) - final_at).total_seconds()
                 if remaining <= 0:
                     raise GatewayError("normal deadline passed")
-                await asyncio.wait_for(gate.normal(operation, expected_id=plan["id"] if plan else None),
+                await asyncio.wait_for(gate.normal(operation, expected_id=plan["id"] if plan else None, intent_id=intent_id),
                                        timeout=remaining)
                 self.check_normal_consent(key, route["run_id"], source_session, final_at)
                 self.normal_session[key] = gate.session
@@ -331,6 +340,7 @@ class SourceSchedule:
                 snapshot = deepcopy(owner.data)
                 snapshot["scenarios"][key]["switch_state"].update(normal="skipped", reason="normal_unconfirmed")
                 snapshot["persons"][gate.person_id]["enabled"] = True
+                snapshot["normal_intent"] = None
                 await self.persist(snapshot)
                 raise
 

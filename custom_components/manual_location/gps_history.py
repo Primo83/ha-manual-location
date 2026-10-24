@@ -267,7 +267,7 @@ class GpsHistory:
                     db.execute("INSERT OR REPLACE INTO meta VALUES ('current_operation',?)", (operation_id,))
             return history_id, self._advance(db)
 
-    async def async_record(self, operation_id, grant, point, snapshots, *, admission=None, promote=True, own_replay=False):
+    async def async_record(self, operation_id, grant, point, snapshots, *, admission=None, promote=True, own_replay=False, authorize=None):
         if (not isinstance(operation_id, str) or not 1 <= len(operation_id) <= 256
                 or not isinstance(grant, str) or not 1 <= len(grant) <= 256
                 or not isinstance(point, dict) or set(point) != {"latitude", "longitude", "timestamp"}
@@ -284,6 +284,8 @@ class GpsHistory:
             raise GpsHistoryError("history_invalid_input")
         async with self._lock:
             self._require(mutation=True)
+            if authorize is not None:
+                authorize()
             try:
                 history_id, self.revision = await self._io(self._capture, operation_id, grant, point, snapshots, admission, promote, own_replay)
             except asyncio.CancelledError:

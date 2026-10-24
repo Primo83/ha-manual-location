@@ -118,17 +118,22 @@ class LocationHistory:
         self.grants.clear()
         self.active_grant = None
 
-    async def begin_normal(self, key):
+    async def begin_normal(self, key, *, intent_id=None):
         if not await self.async_ready():
             raise GatewayError("history unavailable")
-        self.grants[key] = {"session": self.coordinator.gateway.session,
+        self.grants[key] = {"session": self.coordinator.gateway.session, "intent_id": intent_id,
                             "closing_at": None, "deadline": None,
                             "generation": await self.db.async_generation() if self.db is not None else 0}
         self.active_grant = key
 
     def _grant_valid(self, payload):
         grant = self.grants.get(payload["grant"])
-        return bool(grant and grant["session"] == payload["source_session"]
+        intent_id = grant.get("intent_id") if grant else None
+        intent_valid = intent_id is None or (
+            self.coordinator._normal_intent_valid()
+            and self.coordinator.data["normal_intent"]["id"] == intent_id)
+        return bool(grant and intent_valid and payload.get("intent_id") == intent_id
+                    and grant["session"] == payload["source_session"]
                     and (grant["closing_at"] is None or (
                         time.monotonic() <= grant["deadline"] and (
                             payload["lower"] < grant["closing_at"] if grant.get("strict_cutoff")
@@ -151,7 +156,10 @@ class LocationHistory:
 
     async def async_receive(self, payload):
         required = {"operation_id", "grant", "source_session", "point", "snapshots", "lower", "upper", "elapsed"}
-        if not isinstance(payload, dict) or set(payload) not in (required, required | {"core_boot"}):
+        if not isinstance(payload, dict) or not required.issubset(payload) or set(payload) - required - {"core_boot", "intent_id"}:
+            raise LocationError("invalid_input")
+        if "intent_id" in payload and (not isinstance(payload["intent_id"], str)
+                or re.fullmatch(r"[A-Za-z0-9_-]{16,128}", payload["intent_id"]) is None):
             raise LocationError("invalid_input")
         core_boot = payload.get("core_boot")
         if core_boot is not None and core_boot != self.hass.data.get("manual_location_core_boot"):
@@ -197,8 +205,13 @@ class LocationHistory:
         # while no own-current fence has consumed them.
         # Queue behind an active exact deletion; a durable pending failure still
         # rejects capture inside the DB lock, without dropping a healthy live report.
+        def authorize():
+            if not self.coordinator.loaded or not self._grant_valid(payload):
+                raise LocationError("history_unavailable")
+
         result = await db.async_record(payload["operation_id"], payload["grant"], accepted, states,
-                                       admission=admission, promote=self.grants[payload["grant"]]["generation"])
+                                       admission=admission, promote=self.grants[payload["grant"]]["generation"],
+                                       authorize=authorize)
         # ACK preserves the exact REST representation bound by the producer.
         return {"history_id": result["history_id"],
                 "native_timestamp": payload["snapshots"][self.coordinator.gateway.person_id]["last_updated"]}

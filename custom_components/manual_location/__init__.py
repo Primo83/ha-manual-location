@@ -61,7 +61,12 @@ class GatewaySessionView(HomeAssistantView):
         bridge = coordinator.gateway if coordinator is not None else None
         if bridge is None or not coordinator.loaded or (not bridge.ready and request.query.get("control") != "1"):
             raise web.HTTPServiceUnavailable()
-        if request.query.get("control") != "1" and not await coordinator.location_history.async_ready():
+        if request.query.get("control") == "1":
+            try:
+                return web.json_response(await coordinator.async_gateway_control_state())
+            except LocationError:
+                raise web.HTTPServiceUnavailable() from None
+        if not await coordinator.location_history.async_ready():
             raise web.HTTPServiceUnavailable()
         return web.json_response({"session": bridge.session,
                                   "core_boot": request.app[KEY_HASS].data.setdefault(f"{DOMAIN}_core_boot", secrets.token_urlsafe(32))})
