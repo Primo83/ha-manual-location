@@ -136,6 +136,37 @@ class GatewayHistoryQueryView(GatewayHistoryView):
         return web.json_response(result)
 
 
+class GatewayHistoryCorrectionView(GatewayHistoryView):
+    """Execute an exact authorized deletion under the Gateway writer barrier."""
+
+    url = "/api/manual_location/gateway_history/correct"
+    name = f"{DOMAIN}:gateway_history_correction"
+
+    async def post(self, request):
+        coordinator = request.app[KEY_HASS].data.get(DOMAIN)
+        bridge = coordinator.gateway if coordinator is not None else None
+        if not request["hass_user"].is_admin or bridge is None or not coordinator.loaded:
+            raise web.HTTPForbidden()
+        raw = bytearray()
+        async for chunk in request.content.iter_chunked(4096):
+            raw.extend(chunk)
+            if len(raw) > 16384:
+                raise web.HTTPRequestEntityTooLarge(max_size=16384, actual_size=len(raw))
+        try:
+            import json
+            payload = json.loads(raw)
+        except Exception:
+            return web.json_response({"error": "history unavailable"}, status=409)
+        key = payload.pop("gateway_key", "") if isinstance(payload, dict) else ""
+        if not isinstance(key, str) or len(key) > 512 or not key.isascii() or not hmac.compare_digest(key, bridge._token):
+            raise web.HTTPForbidden()
+        try:
+            result = await coordinator.location_history.async_correction(payload)
+        except Exception:
+            return web.json_response({"error": "history unavailable"}, status=409)
+        return web.json_response(result)
+
+
 async def async_setup(hass, config):
     hass.data.setdefault(f"{DOMAIN}_core_boot", secrets.token_urlsafe(32))
     async_register_commands(hass)
@@ -166,6 +197,7 @@ async def async_setup_entry(hass, entry):
         hass.http.register_view(GatewaySessionView)
         hass.http.register_view(GatewayHistoryView)
         hass.http.register_view(GatewayHistoryQueryView)
+        hass.http.register_view(GatewayHistoryCorrectionView)
         hass.data[f"{DOMAIN}_static_registered"] = True
     await async_register_panel(
         hass, frontend_url_path=PANEL_PATH, webcomponent_name="manual-location-admin",

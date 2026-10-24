@@ -1,7 +1,7 @@
-import { callWS, coordinates, errorText } from "./data.js?v=2.1.0";
-import { L, makeMap, mapStyles, setMapHass } from "./map-common.js?v=2.1.0";
-import "./place-search.js?v=2.1.0";
-import "./route-import.js?v=2.1.0";
+import { callWS, coordinates, errorText } from "./data.js?v=2.1.1";
+import { L, makeMap, mapStyles, setMapHass } from "./map-common.js?v=2.1.1";
+import "./place-search.js?v=2.1.1";
+import "./route-import.js?v=2.1.1";
 
 const STATUS = { draft: "Szkic", ready: "Gotowa do uruchomienia", waiting: "Oczekuje na rozpoczęcie", running: "W realizacji", stopped: "Zatrzymana", completed: "Ukończona" };
 export function scenarioStatus(plan) {
@@ -941,10 +941,12 @@ export class ManualLocationScenarios extends HTMLElement {
     const generation = this._generation;
     const previousIds = new Set(Object.keys(state.snapshot.scenarios || {}));
     const entityId = this._context.drafts[id]?.plan.entity_id || state.snapshot.scenarios[id]?.entity_id;
+    let committed = false;
     this._busy = true; this._buttons(); this._notify();
     try {
       const snapshot = await callWS(state.hass, { type: `manual_location/${type}`, token: state.token, revision: state.snapshot.revision, ...extra });
       if (generation !== this._generation || this._state().token !== state.token) return;
+      committed = true;
       const accepted = this._context.onSnapshot(snapshot);
       if (accepted === false) { this._message("Operacja zapisana w HA. Zachowano lokalny szkic, ponieważ formularz pozycji zmienił się w trakcie operacji. Wczytaj stan po zabezpieczeniu zmian."); return; }
       if (replaceDraft) delete this._context.drafts[id];
@@ -968,7 +970,13 @@ export class ManualLocationScenarios extends HTMLElement {
         }
         this._message(error?.code === "revision_conflict" ? "Dane HA zmieniły się. Odświeżono stan; Twój szkic pozostał. Sprawdź wykonane punkty przed ponowieniem zapisu." : errorText(error));
       }
-    } finally { this._busy = false; if (generation === this._generation) { this._refresh(); this._notify(); } }
+    } finally {
+      this._busy = false;
+      if (generation === this._generation) {
+        this._refresh(); this._notify();
+        if (committed && this._state().token === state.token) await this._context.onCommitted?.();
+      }
+    }
   }
 }
 

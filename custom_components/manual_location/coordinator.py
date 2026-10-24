@@ -290,9 +290,11 @@ def validate_persons(hass, persons: object, previous: dict, now: datetime, *, ch
                 {"enabled", "current", "history"},
                 {"enabled", "current", "history", "current_history_timestamp"},
                 {"enabled", "current", "history", "record_current_now"},
+                {"enabled", "current", "history", "record_history_now"},
             )
             # Persisted snapshots cannot request a new point during reload.
             or ("record_current_now" in settings and (settings["record_current_now"] is not True or not check_entities))
+            or ("record_history_now" in settings and not check_entities)
             or type(settings["enabled"]) is not bool
             or not isinstance(settings["history"], list)
             or len(settings["history"]) > MAX_HISTORY
@@ -309,6 +311,14 @@ def validate_persons(hass, persons: object, previous: dict, now: datetime, *, ch
             seen.add(instant)
             history.append(normalized | {"timestamp": instant.isoformat()})
         old_current = previous.get(entity_id, {}).get("current")
+        if "record_history_now" in settings:
+            point = settings["record_history_now"]
+            if (not isinstance(point, dict) or set(point) != {"latitude", "longitude"}
+                    or old_current is None or current != coordinates(old_current)
+                    or now in seen or len(history) >= MAX_HISTORY):
+                raise LocationError("invalid_input")
+            # Request-only marker: HA supplies the time without changing current.
+            history.append(coordinates(point) | {"timestamp": now.isoformat()})
         if "current_history_timestamp" in settings:
             current_at = timestamp(settings["current_history_timestamp"]).isoformat()
             selected = next((point for point in history if point["timestamp"] == current_at), None)
@@ -411,6 +421,8 @@ class ManualLocation:
 
     async def _async_gateway_sync(self):
         """The Store is the latest own target; never enqueue older positions."""
+        if self._location_history is not None and self._location_history.correction_active:
+            return
         if self.gateway.handoff_supported or not self.gateway.ready:
             try:
                 status = await self.gateway.status()
@@ -440,6 +452,17 @@ class ManualLocation:
         self._gateway_retry_cancel = None
         async with self._save_lock:
             if self.loaded:
+                if self._location_history is not None and self._location_history.correction_active:
+                    try:
+                        await self._location_history.async_recover()
+                    except Exception:
+                        # A transient status failure must not strand the busy fence
+                        # or revoke a healthy GPS grant while correction recovery waits.
+                        self._schedule_gateway_retry()
+                        return
+                    if self._location_history.correction_active:
+                        self._schedule_gateway_retry()
+                        return
                 await self._async_gateway_sync()
                 try:
                     await self.location_history.async_recover()
@@ -460,6 +483,8 @@ class ManualLocation:
                         self._schedule_gateway_retry()
 
     async def _async_gateway_return_reconcile(self, status):
+        if status.get("history_correction_pending") or (self._location_history is not None and self._location_history.correction_active):
+            return status
         """Called with _save_lock; persist Own before consuming the Gate latch."""
         status = await self._async_gateway_handoff_reconcile(status)
         plan = status.get("scheduled_return")
@@ -557,6 +582,8 @@ class ManualLocation:
         return status
 
     async def _async_gateway_return_preflight(self):
+        if self._location_history is not None and self._location_history.correction_active:
+            raise LocationError("history_recovering")
         if self.gateway is None:
             return None
         try:
@@ -568,6 +595,8 @@ class ManualLocation:
 
     async def _async_gateway_target_guard(self, snapshot=None, *, start=False):
         """The armed Gate target cannot diverge from Store; called under _save_lock."""
+        if self._location_history is not None and self._location_history.correction_active:
+            raise LocationError("history_recovering")
         if self.gateway is None or not self.gateway.return_supported:
             return
         person_id = self.gateway.person_id
@@ -1092,6 +1121,8 @@ class ManualLocation:
         return snapshot
 
     def _require_revision(self, revision):
+        if self._location_history is not None and self._location_history.correction_active:
+            raise LocationError("history_recovering")
         if type(revision) is not int:
             raise LocationError("invalid_input")
         if revision != self.data["revision"]:
@@ -1100,6 +1131,8 @@ class ManualLocation:
     async def _commit(self, snapshot, *, gateway_normal=False):
         """Commit history/current/cursors together and confirm actual persistence."""
         self._require_loaded()
+        if self._location_history is not None and self._location_history.correction_active:
+            raise LocationError("history_recovering")
         await self._async_gateway_target_guard(snapshot)
         if (self._location_history is not None
                 and self._location_history.db is not None and self._location_history.db.pending):
@@ -1550,6 +1583,9 @@ class ManualLocation:
     async def _async_run_due(self, now):
         async with self._save_lock:
             if not self.loaded:
+                return
+            if self._location_history is not None and self._location_history.correction_active:
+                self._schedule_gateway_retry()
                 return
             try:
                 await self._async_gateway_return_preflight()

@@ -1,6 +1,6 @@
 """Accepted phone history and exact, queued Recorder deletion.
 
-The caller owns PIN, grants, custom/restore checks and the configuration lock.
+The caller owns PIN, grants, source/restore checks and the configuration lock.
 This module never calls the gateway or takes the coordinator's save lock.
 """
 
@@ -305,7 +305,14 @@ class GpsHistory:
             self._require()
             return await self._io(self._get, history_id)
 
-    def _operation(self, binding=None):
+    def _current_history_id(self):
+        # Unlike _operation(), retain this fence while a deletion is pending.
+        with self._database() as db:
+            row = db.execute("SELECT o.history_id FROM meta m JOIN operations o ON o.id=m.value "
+                             "WHERE m.key='current_operation' AND o.deleted=0").fetchone()
+            return row[0] if row else None
+
+    def _operation(self, binding=None, *, check_binding=True):
         with self._database() as db:
             if binding is None:
                 marker = db.execute("SELECT value FROM meta WHERE key='current_operation'").fetchone()
@@ -318,7 +325,7 @@ class GpsHistory:
                              (operation_id,)).fetchone()
             if row is None or row["deleted"]:
                 return None
-            if binding is not None and any(row[column] != binding[key] for key, column in (
+            if binding is not None and check_binding and any(row[column] != binding[key] for key, column in (
                     ("request_digest", "request_digest"), ("grant", "grant_id"),
                     ("source_session", "source_session"), ("core_boot", "core_boot"))):
                 raise GpsHistoryError("history_operation_conflict")
@@ -650,9 +657,9 @@ class GpsHistory:
             raise GpsHistoryError("history_invalid_input")
         return list(values)
 
-    async def async_preview(self, gps_ids, native_ids, current_snapshots, expected_fingerprints=None):
+    async def async_preview(self, gps_ids, native_ids, current_snapshots, expected_fingerprints=None, *, allow_current=False, allow_empty=False):
         gps_ids, native_ids = self._ids(gps_ids), self._ids(native_ids, numeric=True)
-        if not gps_ids and not native_ids:
+        if not gps_ids and not native_ids and not allow_empty:
             raise GpsHistoryError("history_invalid_input")
         current = self._event_refs(self._snapshots(current_snapshots))
         async with self._lock:
@@ -665,14 +672,15 @@ class GpsHistory:
                 if any(ref not in current_rows or current_rows[ref]["fingerprint"] != fingerprint
                        for ref, fingerprint in expected_fingerprints.items()):
                     raise GpsHistoryError("history_changed")
-            return await self._make_preview(records, rows, missing, current)
+            return await self._make_preview(records, rows, missing, current, allow_current=allow_current)
 
     async def _make_preview(self, records, rows, missing, current, *, sampled=False,
                             allow_current=False, range_bounds=None):
         gps_ids = [record["id"] for record in records]
         refs = {self._binary_ref(ref) for record in records for ref in self._event_refs(record["snapshots"])}
         refs.update(self._binary_ref(row["event_refs"][0]) for row in rows)
-        if not allow_current and refs.intersection(self._binary_ref(ref) for ref in current):
+        if not allow_current and (refs.intersection(self._binary_ref(ref) for ref in current)
+                                  or await self._io(self._current_history_id) in gps_ids):
             raise GpsHistoryError("history_current_protected")
         if await self._io(self._related, refs) - set(gps_ids):
             raise GpsHistoryError("history_range_crosses_group" if range_bounds else "history_incomplete_group")
@@ -698,7 +706,7 @@ class GpsHistory:
         self._previews = {key: value for key, value in self._previews.items() if value["expires"] > time.time()}
         if len(self._previews) >= 32:
             self._previews.pop(next(iter(self._previews)))
-        self._previews[token] = {"preview": preview, "native": rows, "current": current, "expires": expires}
+        self._previews[token] = {"preview": preview, "native": rows, "accepted": records, "current": current, "expires": expires}
         if sampled:
             # Full exact selections stay on the server, never a silent 100-row deletion.
             return _bounded(preview | {"gps_ids": [], "native_ids": []})
@@ -720,7 +728,7 @@ class GpsHistory:
             return await self._make_preview(records, rows, 0, current, sampled=True,
                                             allow_current=allow_current, range_bounds=(lower, upper))
 
-    def _begin_delete(self, operation_id, token, value, own_plan):
+    def _begin_delete(self, operation_id, token, value, own_plan, live=False, correction=None):
         with self._database() as db:
             completed = db.execute("SELECT * FROM completed_delete WHERE operation_id=?", (operation_id,)).fetchone()
             if completed:
@@ -729,7 +737,7 @@ class GpsHistory:
                 return json.loads(completed["result"]), None, self._revision(db)
             if self._pending(db):
                 raise GpsHistoryError("history_pending")
-            if self._revision(db) != value["preview"]["revision"]:
+            if not live and self._revision(db) != value["preview"]["revision"]:
                 raise GpsHistoryError("history_changed")
             marker = {"operation_id": operation_id, "token": token,
                       "gps_ids": value["preview"]["gps_ids"], "counts": value["preview"]["counts"],
@@ -737,6 +745,10 @@ class GpsHistory:
                       "own_plan": own_plan,
                       "native": [{key: row[key] for key in ("id", "entity_id", "fingerprint", "event_refs")}
                                  for row in value["native"]]}
+            if correction is not None:
+                marker["counts"] = {**marker["counts"], "custom": correction["custom_count"]}
+                marker["correction"] = correction
+                correction["plan_id"] = _digest(marker)
             db.execute("INSERT INTO pending_delete VALUES (1,?)", (_json(_bounded(marker)),))
             revision = self._advance(db)
             return None, marker, revision
@@ -779,12 +791,25 @@ class GpsHistory:
         with self._database() as db:
             if self._pending(db) != marker:
                 raise GpsHistoryError("history_changed")
+            correction = marker.get("correction")
+            if correction and correction["target"]["kind"] != "unchanged":
+                current = db.execute("SELECT value FROM meta WHERE key='current_operation'").fetchone()
+                generation = int(db.execute("SELECT value FROM meta WHERE key='current_generation'").fetchone()[0])
+                if (current[0] if current else "") != correction["expected_operation"] or generation != correction["generation"]:
+                    raise GpsHistoryError("history_changed")
+                binding = correction["target"]["binding"]
+                db.execute("INSERT OR REPLACE INTO meta VALUES ('current_operation',?)",
+                           (binding["operation_id"] if binding else "",))
             for history_id in marker["gps_ids"]:
                 db.execute("UPDATE operations SET deleted=1,digest='' WHERE history_id=?", (history_id,))
                 db.execute("DELETE FROM points WHERE id=?", (history_id,))
             db.execute("DELETE FROM pending_delete WHERE singleton=1")
             revision = self._advance(db)
             result = {"counts": marker["counts"], "revision": revision, "completed": True}
+            if correction:
+                result.update(current_preserved=correction["current_preserved"],
+                              current_replacement=correction["current_replacement"],
+                              correction=correction)
             db.execute("INSERT INTO completed_delete VALUES (?,?,?)",
                        (marker["operation_id"], marker["token"], _json(result)))
             return result
@@ -798,7 +823,7 @@ class GpsHistory:
                 return json.loads(row["result"])
             return None
 
-    async def async_execute(self, preview_token, operation_id, *, own_plan=None, own_commit=None):
+    async def async_execute(self, preview_token, operation_id, *, own_plan=None, own_commit=None, live=False):
         self.delete_epoch += 1
         if not isinstance(operation_id, str) or not 1 <= len(operation_id) <= 256:
             raise GpsHistoryError("history_invalid_input")
@@ -811,14 +836,32 @@ class GpsHistory:
             value = self._previews.get(preview_token)
             if value is None or value["expires"] <= time.time():
                 raise GpsHistoryError("history_preview_expired")
+            if live:
+                # Incoming reports may append rows after preview. Validate only the
+                # exact selected group; never widen it to a new time-range query.
+                if await self._io(self._current_history_id) in value["preview"]["gps_ids"]:
+                    raise GpsHistoryError("history_current_protected")
+                if await self._io(self._selection, value["preview"]["gps_ids"]) != value["accepted"]:
+                    raise GpsHistoryError("history_changed")
+                selected_refs = {self._binary_ref(ref) for record in value["accepted"]
+                                 for ref in self._event_refs(record["snapshots"])}
+                selected_refs.update(self._binary_ref(ref) for row in value["native"] for ref in row["event_refs"])
+                if await self._io(self._related, selected_refs) - set(value["preview"]["gps_ids"]):
+                    raise GpsHistoryError("history_incomplete_group")
             for ref in value["current"]:
                 state = self.hass.states.get(ref["entity_id"])
-                if (state is None or state.last_updated_timestamp != ref["last_updated_ts"]
-                        or state.context.id != ref["context_id"]):
+                if state is None:
+                    raise GpsHistoryError("history_changed")
+                if live:
+                    current_ref = self._binary_ref({"entity_id": ref["entity_id"],
+                        "last_updated_ts": state.last_updated_timestamp, "context_id": state.context.id})
+                    if current_ref in selected_refs:
+                        raise GpsHistoryError("history_current_protected")
+                elif (state.last_updated_timestamp != ref["last_updated_ts"] or state.context.id != ref["context_id"]):
                     raise GpsHistoryError("history_changed")
             self.pending = True
             try:
-                _, marker, self.revision = await self._io(self._begin_delete, operation_id, preview_token, value, own_plan)
+                _, marker, self.revision = await self._io(self._begin_delete, operation_id, preview_token, value, own_plan, live)
             except GpsHistoryError:
                 if self.available:
                     marker, self.revision = await self._io(self._read_state)
@@ -834,6 +877,127 @@ class GpsHistory:
             self._previews.clear()
             return result
 
+    def _last_admitted(self, excluded):
+        with self._database() as db:
+            rows = db.execute("SELECT a.operation_id,o.history_id FROM admissions a "
+                              "JOIN operations o ON o.id=a.operation_id JOIN points p ON p.id=o.history_id "
+                              "WHERE o.deleted=0 ORDER BY a.seq DESC")
+            binding = next((row for row in rows if row["history_id"] not in excluded), None)
+        return self._operation({"operation_id": binding["operation_id"]}, check_binding=False) if binding else None
+
+    async def async_last_admitted(self, excluded=()):
+        async with self._lock:
+            self._require()
+            return await self._io(self._last_admitted, set(excluded))
+
+    def _correction_target(self, value, current, own, own_changed, mode):
+        selected = set(value["preview"]["gps_ids"])
+        refs = {self._binary_ref(ref) for row in value["native"] for ref in row["event_refs"]}
+        refs.update(self._binary_ref(ref) for record in value["accepted"] for ref in self._event_refs(record["snapshots"]))
+        accepted = self._operation()
+        replaces = bool(own_changed if mode == "custom" else (
+                        (accepted and accepted["history_id"] in selected)
+                        or refs.intersection(self._binary_ref(ref) for ref in current)
+                        or (own_changed and accepted is None)))
+        candidate = accepted
+        if replaces:
+            candidate = self._last_admitted(selected) if mode == "normal" and accepted else None
+        elif mode == "custom":
+            candidate = None
+        point = candidate["point"] if candidate else own
+        if point is None:
+            raise GpsHistoryError("history_no_replacement")
+        binding = {key: candidate[key] for key in
+                   ("operation_id", "grant", "source_session", "core_boot", "request_digest")} if candidate else None
+        target = {"kind": ("phone" if candidate else "own") if replaces else "unchanged",
+                  "point": {"person_id": self.person_id, "latitude": point["latitude"], "longitude": point["longitude"],
+                            "gps_accuracy": candidate["snapshots"][self.person_id]["gps_accuracy"] if candidate else 0},
+                  "binding": binding, "history_id": candidate["history_id"] if candidate else None,
+                  "native_timestamp": point["timestamp"]}
+        with self._database() as db:
+            marker = db.execute("SELECT value FROM meta WHERE key='current_operation'").fetchone()
+            generation = int(db.execute("SELECT value FROM meta WHERE key='current_generation'").fetchone()[0])
+        return {"target": target, "current_preserved": not replaces,
+                "current_replacement": {"point": point, "source": "ha" if candidate else "custom"},
+                "expected_operation": marker[0] if marker else "", "generation": generation}
+
+    async def async_correction_target(self, preview_token, current_snapshots, own, own_changed, mode):
+        async with self._lock:
+            self._require(mutation=True)
+            value = self._previews.get(preview_token)
+            if value is None:
+                raise GpsHistoryError("history_preview_expired")
+            return await self._io(self._correction_target, value, self._event_refs(current_snapshots), own, own_changed, mode)
+
+    @staticmethod
+    def _correction_response(operation_id, correction, result=None):
+        response = {"operation_id": operation_id, **{key: correction[key] for key in
+                    ("plan_id", "target", "current_preserved", "current_replacement")}}
+        if result is not None:
+            response["result"] = {key: value for key, value in result.items() if key != "correction"}
+            response["result"].update(deleted=True, operation_id=operation_id)
+        return response
+
+    async def async_correction_state(self, operation_id, preview_token):
+        async with self._lock:
+            self._require()
+            completed = await self._io(self._completed, operation_id, preview_token)
+            if completed and completed.get("correction"):
+                return self._correction_response(operation_id, completed["correction"], completed)
+            marker, _revision = await self._io(self._read_state)
+            if marker and marker["operation_id"] == operation_id and marker["token"] == preview_token and marker.get("correction"):
+                return self._correction_response(operation_id, marker["correction"])
+            return None
+
+    async def async_prepare_correction(self, preview_token, operation_id, current_snapshots, *, own_plan, own, own_changed, mode, custom_count=0):
+        async with self._lock:
+            self._require(mutation=True)
+            value = self._previews.get(preview_token)
+            if value is None or value["expires"] <= time.time():
+                raise GpsHistoryError("history_preview_expired")
+            if await self._io(self._selection, value["preview"]["gps_ids"]) != value["accepted"]:
+                raise GpsHistoryError("history_changed")
+            refs = {self._binary_ref(ref) for row in value["native"] for ref in row["event_refs"]}
+            refs.update(self._binary_ref(ref) for record in value["accepted"] for ref in self._event_refs(record["snapshots"]))
+            if await self._io(self._related, refs) - set(value["preview"]["gps_ids"]):
+                raise GpsHistoryError("history_incomplete_group")
+            native_rows, _missing = await self._native_job(self._native_selection, value["accepted"], value["preview"]["native_ids"])
+            if ({row["id"]: row["fingerprint"] for row in native_rows}
+                    != {row["id"]: row["fingerprint"] for row in value["native"]}):
+                raise GpsHistoryError("history_changed")
+            correction = await self._io(self._correction_target, value, self._event_refs(current_snapshots), own, own_changed, mode)
+            correction["custom_count"] = custom_count
+            self.pending = True
+            try:
+                _, marker, self.revision = await self._io(self._begin_delete, operation_id, preview_token, value, own_plan, True, correction)
+            except GpsHistoryError:
+                if self.available:
+                    marker, self.revision = await self._io(self._read_state)
+                    self.pending = marker is not None
+                raise
+            self.delete_epoch += 1
+            return self._correction_response(operation_id, marker["correction"])
+
+    async def async_commit_correction(self, operation_id, preview_token, plan_id, *, own_commit, native_check):
+        async with self._lock:
+            self._require()
+            completed = await self._io(self._completed, operation_id, preview_token)
+            if completed and completed.get("correction", {}).get("plan_id") == plan_id:
+                return self._correction_response(operation_id, completed["correction"], completed)
+            marker, _revision = await self._io(self._read_state)
+            if (not marker or marker["operation_id"] != operation_id or marker["token"] != preview_token
+                    or marker.get("correction", {}).get("plan_id") != plan_id):
+                raise GpsHistoryError("history_changed")
+            native_check(marker["correction"]["target"])
+            if marker["native"]:
+                await self._native_job(self._delete_native, marker)
+            if marker.get("own_plan") is not None:
+                await own_commit(marker["own_plan"])
+            result = await self._io(self._finish_delete, marker)
+            self.pending, self.revision = False, result["revision"]
+            self._previews.clear()
+            return self._correction_response(operation_id, result["correction"], result)
+
     def _read_state(self):
         with self._database() as db:
             # One SQLite read snapshot: cancellation may have committed cleanup
@@ -842,7 +1006,7 @@ class GpsHistory:
                              "(SELECT value FROM meta WHERE key='revision')").fetchone()
             return json.loads(row[0]) if row[0] else None, int(row[1])
 
-    async def async_recover(self, current_snapshots, *, own_commit=None):
+    async def async_recover(self, current_snapshots, *, own_commit=None, allow_current=True):
         self.delete_epoch += 1
         current = {self._binary_ref(ref) for ref in self._event_refs(self._snapshots(current_snapshots))}
         async with self._lock:
@@ -853,8 +1017,11 @@ class GpsHistory:
                 self.pending = False
                 return True
             self.pending = True
-            if not marker.get("allow_current", False) and any(
-                    self._binary_ref(ref) in current for row in marker["native"] for ref in row["event_refs"]):
+            if marker.get("correction"):
+                raise GpsHistoryError("history_correction_unavailable")
+            if (not allow_current or not marker.get("allow_current", False)) and (
+                    await self._io(self._current_history_id) in marker["gps_ids"] or any(
+                        self._binary_ref(ref) in current for row in marker["native"] for ref in row["event_refs"])):
                 raise GpsHistoryError("history_current_protected")
             if marker.get("own_plan") is not None and own_commit is None:
                 raise GpsHistoryError("history_own_commit_required")

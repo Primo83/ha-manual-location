@@ -46,6 +46,8 @@ class GatewayBridge:
         self.pending = False
         self.return_supported = False
         self.handoff_supported = False
+        self.history_correction_supported = False
+        self.history_correction_pending = False
 
     def invalidate(self):
         """A delayed normal grant must not survive a later close or failure."""
@@ -148,7 +150,9 @@ class GatewayBridge:
                 or handoff["state"] not in {"idle", "prepared", "applied"})):
             raise GatewayError("invalid handoff status")
         self.handoff_supported = self.handoff_supported or handoff_supported
-        blocked = self.pending or result.get("upstream_uncertain") or result.get("replay_required") or result.get("recovery_retryable")
+        self.history_correction_supported = result.get("history_correction_supported") is True
+        self.history_correction_pending = result.get("history_correction_pending") is True
+        blocked = self.pending or self.history_correction_pending or result.get("upstream_uncertain") or result.get("replay_required") or result.get("recovery_retryable")
         return {"enabled": True, "available": True, "person_id": self.person_id,
                 "mode": "blocked" if blocked else result["mode"],
                 "gps_blocked": result["mode"] in {"custom", "warmup"} and not bool(result.get("upstream_uncertain")),
@@ -156,6 +160,8 @@ class GatewayBridge:
                 "replay_required": bool(result.get("replay_required")),
                 "upstream_uncertain": bool(result.get("upstream_uncertain")),
                 "recovery_retryable": bool(result.get("recovery_retryable")),
+                "history_correction_supported": self.history_correction_supported,
+                "history_correction_pending": self.history_correction_pending,
                 "has_custom_point": custom is not None,
                 "last_custom_receipt": custom, "last_phone_receipt": phone,
                 "scheduled_return_supported": supported, "scheduled_return": plan,
@@ -270,3 +276,12 @@ class GatewayBridge:
         if plan is None or plan["state"] != "idle" or plan["id"] == expected_id:
             raise GatewayError("scheduled return acknowledgment unconfirmed")
         return status
+
+
+    async def correct_history(self, operation_id, preview_token):
+        if not self.history_correction_supported:
+            raise GatewayError("history correction unsupported")
+        result = await self._request("/control/history-correction", {
+            "operation_id": operation_id, "preview_token": preview_token, "source_session": self.session})
+        self._status(result)
+        return result

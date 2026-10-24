@@ -33,7 +33,7 @@ def _snapshot_hash(value):
 
 
 class LocationHistory:
-    """The gateway callback never takes the coordinator's configuration lock."""
+    """Phone admission bypasses the configuration lock; correction callbacks own it."""
 
     def __init__(self, coordinator):
         self.coordinator = coordinator
@@ -44,10 +44,17 @@ class LocationHistory:
         self.grants = {}
         self.active_grant = None
         self.previews = {}
+        self._correction_requests = {}
+        self._correction_task = None
         self._closing = False
         self._snapshots_cache = {}
         self._snapshot_timer = None
         self._selection_key = secrets.token_bytes(32)
+
+    @property
+    def correction_active(self):
+        return bool(self._correction_requests or (self.db is not None and self.db.pending)
+                    or getattr(self.coordinator.gateway, "history_correction_pending", False))
 
     def stop(self):
         """Revoke callbacks before unloading waits for any other writer."""
@@ -165,7 +172,7 @@ class LocationHistory:
                 or abs(point["latitude"]) > 90 or abs(point["longitude"]) > 180 or point["gps_accuracy"] < 0):
             raise LocationError("invalid_input")
         db = await self.async_prepare()
-        if not self.coordinator.loaded or db.pending or not self._grant_valid(payload):
+        if not self.coordinator.loaded or not self._grant_valid(payload):
             raise LocationError("history_unavailable")
         states = self._snapshots()
         if not isinstance(payload["snapshots"], dict) or set(payload["snapshots"]) != set(states):
@@ -188,6 +195,8 @@ class LocationHistory:
         # A late admitted callback may complete history, but cannot displace a
         # later explicit Own intent. Closed grants retain their admission only
         # while no own-current fence has consumed them.
+        # Queue behind an active exact deletion; a durable pending failure still
+        # rejects capture inside the DB lock, without dropping a healthy live report.
         result = await db.async_record(payload["operation_id"], payload["grant"], accepted, states,
                                        admission=admission, promote=self.grants[payload["grant"]]["generation"])
         # ACK preserves the exact REST representation bound by the producer.
@@ -383,9 +392,23 @@ class LocationHistory:
                 "next_cursor": json.dumps({"snapshot_version": 1, "snapshot_id": snapshot_id,
                                            "offset": offset + 100}) if has_more else None}
 
-    async def _custom_snapshots(self):
+    async def _delete_snapshots(self):
+        """Allow confirmed live GPS without opening or closing its grant."""
         coordinator, bridge = self.coordinator, self.coordinator.gateway
         status = await bridge.status()
+        person = coordinator.data["persons"].get(bridge.person_id)
+        if status["mode"] == "normal":
+            if (not person or person["enabled"] or not coordinator.data["enabled"]
+                    or not bridge.ready or bridge.pending):
+                raise LocationError("history_source_unconfirmed")
+            return self._snapshots(), False
+        if status["mode"] != "custom":
+            raise LocationError("history_source_unconfirmed")
+        return await self._custom_snapshots(status), True
+
+    async def _custom_snapshots(self, status=None):
+        coordinator, bridge = self.coordinator, self.coordinator.gateway
+        status = status or await bridge.status()
         person = coordinator.data["persons"].get(bridge.person_id)
         own = person.get("current") if person else None
         if (not own or not coordinator.data["enabled"] or not person["enabled"]
@@ -425,39 +448,37 @@ class LocationHistory:
         async with self.coordinator._save_lock:
             self._authorize(connection, token, entity_id, revision)
             db = await self.async_prepare()
-            states = await self._custom_snapshots()
+            states, custom_mode = await self._delete_snapshots()
             self._authorize(connection, token, entity_id, revision)
             if type(include_custom) is not bool:
                 raise LocationError("invalid_input")
-            own_plan = None
-            removed = []
+            target = deepcopy(self.coordinator.data)
+            person = target["persons"][entity_id]
+            removed, gps_ids, native_ids, fingerprints = [], [], [], {}
+            own_changed = False
             if start is not None:
                 a, b = timestamp(start), timestamp(end)
                 if b < a or b - a > timedelta(days=31):
                     raise LocationError("invalid_input")
-                preview = await db.async_range_preview(start, end, states, allow_empty=include_custom, allow_current=True)
                 if include_custom:
-                    target = deepcopy(self.coordinator.data)
-                    person = target["persons"][entity_id]
                     removed = [point for point in person["history"] if a <= timestamp(point["timestamp"]) <= b]
-                    if removed:
-                        person["history"] = [point for point in person["history"] if not a <= timestamp(point["timestamp"]) <= b]
-                        for scenario in target.get("scenarios", {}).values():
-                            if (scenario["entity_id"] == entity_id and scenario["status"] == "running"
-                                    and scenario["cursor"] > scenario.get("run_start_cursor", 0)):
-                                scenario.update(status="stopped", reason="manual_change")
-                        target["revision"] += 1
-                        own_plan = {"before_hash": _snapshot_hash(self.coordinator.data),
-                                    "after_hash": _snapshot_hash(target), "target_snapshot": target}
+                    person["history"] = [point for point in person["history"] if not a <= timestamp(point["timestamp"]) <= b]
+                preview = await db.async_range_preview(start, end, states, allow_empty=include_custom, allow_current=True)
             else:
                 if not isinstance(selection, list) or not 1 <= len(selection) <= 100:
                     raise LocationError("invalid_input")
-                gps_ids, native_ids, fingerprints = [], [], {}
                 for row in selection:
                     if (not isinstance(row, dict) or set(row) not in (
                             {"kind", "ref"}, {"kind", "ref", "snapshot_id", "fingerprint", "proof"})
                             or not isinstance(row.get("ref"), str)):
                         raise LocationError("invalid_input")
+                    if row["kind"] == "custom":
+                        if set(row) != {"kind", "ref"} or own_changed or row["ref"] != person["current"]["timestamp"]:
+                            raise LocationError("history_changed")
+                        own_changed = True
+                        removed.append(deepcopy(person["current"]))
+                        person["history"] = [point for point in person["history"] if point["timestamp"] != row["ref"]]
+                        continue
                     if "snapshot_id" in row:
                         if (any(not isinstance(row[key], str) or not row[key] or len(row[key]) > 256
                                 for key in ("snapshot_id", "fingerprint", "proof"))
@@ -465,7 +486,6 @@ class LocationHistory:
                                 or not hmac.compare_digest(row["proof"], self._selection_proof(
                                     connection, token, entity_id, revision, row["snapshot_id"], row["ref"], row["fingerprint"]))):
                             raise LocationError("history_changed")
-                        # A signed row remains selectable after cache expiry; freshness is checked below.
                         fingerprints[row["ref"]] = row["fingerprint"]
                     if row["kind"] == "accepted" and row["ref"].startswith("accepted:"):
                         gps_ids.append(row["ref"].removeprefix("accepted:"))
@@ -473,17 +493,41 @@ class LocationHistory:
                         native_ids.append(int(row["ref"][7:]))
                     else:
                         raise LocationError("invalid_input")
-                preview = await db.async_preview(gps_ids, native_ids, states, fingerprints)
+                if own_changed:
+                    candidates = [point for point in person["history"] if timestamp(point["timestamp"]) <= datetime.now(UTC)]
+                    accepted = await db.async_last_admitted(gps_ids)
+                    replacement = max(candidates, key=lambda point: timestamp(point["timestamp"])) if candidates else (accepted["point"] if accepted else None)
+                    if replacement is None:
+                        raise LocationError("history_no_replacement")
+                    person["current"] = deepcopy(replacement)
+                preview = await db.async_preview(gps_ids, native_ids, states, fingerprints,
+                                                allow_current=True, allow_empty=own_changed)
+            own_plan = None
+            if removed:
+                for scenario in target.get("scenarios", {}).values():
+                    if (scenario["entity_id"] == entity_id and scenario["status"] == "running"
+                            and scenario["cursor"] > scenario.get("run_start_cursor", 0)):
+                        scenario.update(status="stopped", reason="manual_change")
+                target["revision"] += 1
+                own_plan = {"before_hash": _snapshot_hash(self.coordinator.data),
+                            "after_hash": _snapshot_hash(target), "target_snapshot": target}
             self._authorize(connection, token, entity_id, revision)
             if not removed and not preview["counts"].get("native") and not preview["counts"].get("accepted"):
                 raise LocationError("history_empty_selection")
+            correction = await db.async_correction_target(preview["token"], states, person["current"], own_changed,
+                                                          "custom" if custom_mode else "normal")
+            needs_correction = not correction["current_preserved"] or own_changed
+            if needs_correction and (custom_mode or not self.coordinator.gateway.history_correction_supported):
+                raise LocationError("history_correction_unavailable")
             operation_id = secrets.token_hex(16)
             self.previews = {preview["token"]: {"connection": connection, "token": token,
                              "operation_id": operation_id, "revision": revision,
-                             "session": self.coordinator.gateway.session,
+                             "session": self.coordinator.gateway.session, "entity_id": entity_id,
                              "own_plan": own_plan, "custom_count": len(removed),
-                             "expires": time.monotonic() + 120}}
-            result = {**preview, "preview_token": preview["token"], "operation_id": operation_id}
+                             "correction": needs_correction, "own": person["current"], "own_changed": own_changed,
+                             "mode": "custom" if custom_mode else "normal", "expires": time.monotonic() + 120}}
+            result = {**preview, "preview_token": preview["token"], "operation_id": operation_id,
+                      **{key: correction[key] for key in ("current_preserved", "current_replacement")}}
             result["counts"] = {**preview["counts"], "custom": len(removed)}
             if removed:
                 result["rows"] = (preview.get("rows", []) + [
@@ -491,7 +535,6 @@ class LocationHistory:
                      "point": point, "timestamp": point["timestamp"]} for point in removed
                 ])[:100]
                 result["truncated"] = len(removed) + len(preview.get("rows", [])) > 100 or preview.get("truncated", False)
-            result["current_preserved"] = True
             if start is not None:
                 result["selected_range"] = {"start": start, "end": end}
             return result
@@ -504,21 +547,108 @@ class LocationHistory:
                     or preview["operation_id"] != operation_id or preview["revision"] != revision
                     or preview["session"] != self.coordinator.gateway.session or time.monotonic() > preview["expires"]):
                 raise LocationError("history_changed")
-            await self._custom_snapshots()
+            _states, custom_mode = await self._delete_snapshots()
             self._authorize(connection, token, entity_id, revision)
             self._clear_snapshots()
             if preview["own_plan"] is not None:
                 await self._check_own_plan(preview["own_plan"])
-            try:
-                result = await self.db.async_execute(preview_token, operation_id,
-                                                    own_plan=preview["own_plan"], own_commit=self._commit_own)
-            except BaseException:
-                if self.db.pending:
-                    self.coordinator._schedule_gateway_retry()
-                raise
-            self._authorize(connection, token, entity_id)
-            return {**result, "deleted": True, "operation_id": operation_id,
-                    "counts": {**result.get("counts", {}), "custom": preview["custom_count"]}}
+            if preview.get("correction"):
+                if custom_mode or preview["mode"] != "normal":
+                    raise LocationError("history_source_unconfirmed")
+                if not self.coordinator.gateway.history_correction_supported:
+                    raise LocationError("history_correction_unavailable")
+                self._correction_requests[operation_id] = {**preview, "preview_token": preview_token}
+            else:
+                try:
+                    result = await self.db.async_execute(preview_token, operation_id,
+                                                        own_plan=preview["own_plan"], own_commit=self._commit_own, live=not custom_mode)
+                except BaseException:
+                    if self.db.pending:
+                        self.coordinator._schedule_gateway_retry()
+                    raise
+                self._authorize(connection, token, entity_id)
+                current = await self.async_current()
+                admitted = await self.db.async_operation()
+                return {**result, "deleted": True, "operation_id": operation_id,
+                        "current_preserved": True, "current_replacement": {"point": current, "source": "ha" if admitted and not custom_mode else "custom"},
+                        "counts": {**result.get("counts", {}), "custom": preview["custom_count"]}}
+        # The Gateway owns its writer lock before calling back into our save/DB locks.
+        return await self._run_correction(operation_id, preview_token)
+
+    async def _run_correction(self, operation_id, preview_token):
+        try:
+            reply = await self.coordinator.gateway.correct_history(operation_id, preview_token)
+            result = reply.get("result")
+            if not isinstance(result, dict):
+                raise LocationError("history_changed")
+            if result.get("rejected"):
+                self._correction_requests.pop(operation_id, None)
+                raise LocationError(result.get("error_code", "history_changed"))
+            if result.get("deleted") is not True or result.get("operation_id") != operation_id:
+                raise LocationError("history_changed")
+            self._correction_requests.pop(operation_id, None)
+            return result
+        except BaseException:
+            self.coordinator._schedule_gateway_retry()
+            raise
+
+    async def async_correction(self, payload):
+        required = {"phase", "operation_id", "preview_token", "source_session", "core_boot"}
+        if (not isinstance(payload, dict) or set(payload) not in (required, required | {"plan_id"})
+                or payload["phase"] not in {"prepare", "commit"}
+                or (payload["phase"] == "commit" and "plan_id" not in payload)
+                or any(not isinstance(value, str) or not 1 <= len(value) <= 256 for value in payload.values())):
+            raise LocationError("invalid_input")
+        operation_id, preview_token = payload["operation_id"], payload["preview_token"]
+        async with self.coordinator._save_lock:
+            db = await self.async_prepare()
+            existing = await db.async_correction_state(operation_id, preview_token)
+            if existing is not None:
+                if "plan_id" in payload and existing["plan_id"] != payload["plan_id"]:
+                    raise LocationError("history_changed")
+                if payload["phase"] == "prepare" or "result" in existing:
+                    return existing
+            if payload["phase"] == "prepare":
+                request = self._correction_requests.get(operation_id)
+                try:
+                    if (not request or request["preview_token"] != preview_token
+                            or request["session"] != payload["source_session"]
+                            or payload["source_session"] != self.coordinator.gateway.session
+                            or payload["core_boot"] != self.hass.data.get("manual_location_core_boot")
+                            or request["expires"] < time.monotonic()):
+                        raise LocationError("history_changed")
+                    self._authorize(request["connection"], request["token"], request["entity_id"])
+                    if request["revision"] != self.coordinator.data["revision"]:
+                        raise LocationError("revision_conflict")
+                    if request["own_plan"] is not None:
+                        await self._check_own_plan(request["own_plan"])
+                except LocationError as error:
+                    return {"operation_id": operation_id, "rejected": True, "error_code": error.code}
+                from .gps_history import GpsHistoryError
+                try:
+                    return await db.async_prepare_correction(preview_token, operation_id, self._snapshots(),
+                        own_plan=request["own_plan"], own=request["own"], own_changed=request["own_changed"],
+                        mode=request["mode"], custom_count=request["custom_count"])
+                except GpsHistoryError as error:
+                    if db.available and not db.pending:
+                        return {"operation_id": operation_id, "rejected": True, "error_code": error.code}
+                    raise
+            if existing is None or "plan_id" not in payload:
+                raise LocationError("history_changed")
+            async def commit_own(plan):
+                await self._commit_own(plan, correction=True)
+            response = await db.async_commit_correction(operation_id, preview_token, payload["plan_id"],
+                                                        own_commit=commit_own, native_check=self._check_correction_native)
+            # Keep reservation until the Gateway has durably installed its new baseline.
+            return response
+
+    def _check_correction_native(self, target):
+        if target["kind"] == "unchanged":
+            return
+        point = target["point"]
+        if any(any(not _number(state[key]) or abs(state[key] - point[key]) >= 1e-8
+                   for key in ("latitude", "longitude", "gps_accuracy")) for state in self._snapshots().values()):
+            raise LocationError("history_changed")
 
     async def _check_own_plan(self, plan):
         durable = await self.coordinator.store.async_load()
@@ -528,13 +658,13 @@ class LocationHistory:
             raise LocationError("history_changed")
         return durable, current_hash
 
-    async def _commit_own(self, plan):
+    async def _commit_own(self, plan, *, correction=False):
         durable, current_hash = await self._check_own_plan(plan)
         if current_hash == plan["after_hash"]:
             self.coordinator.data = deepcopy(durable)
             return
         target = plan["target_snapshot"]
-        if (self.coordinator._gateway_current(target) != self.coordinator._gateway_current(self.coordinator.data)
+        if not correction and (self.coordinator._gateway_current(target) != self.coordinator._gateway_current(self.coordinator.data)
                 or not self.coordinator.gateway.ready or self.coordinator.gateway.pending):
             raise LocationError("history_requires_custom")
         # The caller already owns _save_lock, before the history DB lock.
@@ -544,10 +674,33 @@ class LocationHistory:
             raise LocationError("storage_error")
         self.coordinator._require_loaded()
         self.coordinator.data = deepcopy(target)
+        if correction:
+            self.coordinator._gateway_applied = deepcopy(self.coordinator._gateway_current(target))
+            self.coordinator._reschedule()
+
+    async def _retry_correction(self, operation_id, preview_token):
+        try:
+            await self._run_correction(operation_id, preview_token)
+        except (LocationError, GatewayError):
+            self.coordinator._schedule_gateway_retry()
 
     async def async_recover(self):
+        if self._correction_requests:
+            operation_id, request = next(iter(self._correction_requests.items()))
+            if self._correction_task is None or self._correction_task.done():
+                self._correction_task = self.hass.async_create_task(self._retry_correction(operation_id, request["preview_token"]))
+            return
         if self.db is not None and self.db.pending:
+            marker, _revision = await self.db._io(self.db._read_state)
+            if marker and marker.get("correction"):
+                if self._correction_task is None or self._correction_task.done():
+                    self._correction_task = self.hass.async_create_task(self._retry_correction(marker["operation_id"], marker["token"]))
+                return
             self._clear_snapshots()
-            states = await self._custom_snapshots()
-            if not await self.db.async_recover(states, own_commit=self._commit_own):
+            states, allow_current = await self._delete_snapshots()
+            if not await self.db.async_recover(states, own_commit=self._commit_own, allow_current=allow_current):
                 raise LocationError("history_unavailable")
+        elif self.coordinator.gateway.history_correction_pending:
+            # A Gate background retry may finish after this Core lost its WS context.
+            # Status is nonblocking during the barrier; clear a stale cached busy flag.
+            await self.coordinator.gateway.status()
