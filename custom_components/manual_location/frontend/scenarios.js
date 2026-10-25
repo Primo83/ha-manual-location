@@ -1,7 +1,7 @@
-import { callWS, coordinates, errorText } from "./data.js?v=2.2.1";
-import { L, makeMap, mapStyles, setMapHass } from "./map-common.js?v=2.2.1";
-import "./place-search.js?v=2.2.1";
-import "./route-import.js?v=2.2.1";
+import { callWS, coordinates, errorText } from "./data.js?v=2.2.2";
+import { L, makeMap, mapStyles, setMapHass } from "./map-common.js?v=2.2.2";
+import "./place-search.js?v=2.2.2";
+import "./route-import.js?v=2.2.2";
 
 const STATUS = { draft: "Szkic", ready: "Gotowa do uruchomienia", waiting: "Oczekuje na rozpoczęcie", running: "W realizacji", stopped: "Zatrzymana", completed: "Ukończona" };
 export function scenarioStatus(plan) {

@@ -1,8 +1,8 @@
-import { activityPayload, activitySettings, adminPersonOptions, callWS, editHistory, errorText, localDateInput, readPoint, removeHistory } from "./data.js?v=2.2.1";
-import { L, makeMap, mapStyles, popup } from "./map-common.js?v=2.2.1";
-import { registerReloadBlocker, startUpdateCheck } from "./updates.js?v=2.2.1";
-import "./scenarios.js?v=2.2.1";
-import "./place-search.js?v=2.2.1";
+import { activityPayload, activitySettings, adminPersonOptions, callWS, editHistory, errorText, localDateInput, readPoint, removeHistory } from "./data.js?v=2.2.2";
+import { L, makeMap, mapStyles, popup } from "./map-common.js?v=2.2.2";
+import { registerReloadBlocker, startUpdateCheck } from "./updates.js?v=2.2.2";
+import "./scenarios.js?v=2.2.2";
+import "./place-search.js?v=2.2.2";
 
 const DRAFT_COLOR = "#7c3aed";
 const CUSTOM_COLOR = "#1976d2";
@@ -1000,7 +1000,7 @@ export class ManualLocationAdmin extends HTMLElement {
         history.pendingSnapshotId = page.snapshot_id; history.pendingRevision = page.history_revision;
         history.pendingRows = nextRows; history.cursor = page.next_cursor; history.continueReplacement = true; return;
       }
-      const unchanged = oldSignature && oldSignature === page.signature && !history.replacementKeys?.length;
+      const unchanged = history.replaceOnLoad && oldSignature && oldSignature === page.signature && !history.replacementKeys?.length;
       history.rows = unchanged ? prior : nextRows;
       history.changed = this._historyRowsKey(prior.map((ha) => ({ source: "ha", ha, point: ha.point || { timestamp: ha.timestamp } })))
         !== this._historyRowsKey(history.rows.map((ha) => ({ source: "ha", ha, point: ha.point || { timestamp: ha.timestamp } })));
@@ -1060,6 +1060,7 @@ export class ManualLocationAdmin extends HTMLElement {
     const tools = this.shadowRoot.querySelector("#ha-history-tools");
     if (!tools) return;
     const history = this._haHistory, enabled = !!this._gatewayFor(this._selected);
+    this.shadowRoot.querySelector("#history-more").disabled = this._historyShowHa && !!(history?.loading || history?.error);
     tools.hidden = !enabled;
     const help = this.shadowRoot.querySelector("#ha-history-help"); help.hidden = !enabled;
     this.shadowRoot.querySelector("#ha-delete-range-fields").hidden = !enabled;
@@ -1641,7 +1642,6 @@ export class ManualLocationAdmin extends HTMLElement {
     more.hidden = !window.hidden && !moreHa && !expandHa;
     const recentHa = moreHa && Date.parse(this._haHistory.rows.at(-1)?.timestamp) >= Date.now() - 48 * 3600000;
     more.textContent = recentHa ? "Pokaż kolejne wpisy HA" : moreHa ? "Pokaż starsze (kolejna partia)" : expandHa ? "Pokaż starsze (do 31 dni HA)" : `Pokaż starsze (${Math.min(100, window.hidden)})`;
-    more.disabled = this._historyShowHa && !!(this._haHistory?.loading || this._haHistory?.error);
     this.shadowRoot.querySelector("#history-recent").hidden = !this._historyOlderCount;
     this._historyWindowMinute = Math.floor(Date.now() / 60000);
     this.shadowRoot.querySelector("#add-history").textContent = this._editIndex < 0 ? "Dodaj punkt" : "Zastosuj edycję";
