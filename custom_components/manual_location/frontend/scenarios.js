@@ -1,7 +1,7 @@
-import { callWS, coordinates, errorText } from "./data.js?v=2.1.2";
-import { L, makeMap, mapStyles, setMapHass } from "./map-common.js?v=2.1.2";
-import "./place-search.js?v=2.1.2";
-import "./route-import.js?v=2.1.2";
+import { callWS, coordinates, errorText } from "./data.js?v=2.2.0";
+import { L, makeMap, mapStyles, setMapHass } from "./map-common.js?v=2.2.0";
+import "./place-search.js?v=2.2.0";
+import "./route-import.js?v=2.2.0";
 
 const STATUS = { draft: "Szkic", ready: "Gotowa do uruchomienia", waiting: "Oczekuje na rozpoczęcie", running: "W realizacji", stopped: "Zatrzymana", completed: "Ukończona" };
 export function scenarioStatus(plan) {
@@ -22,6 +22,7 @@ const SWITCH_REASON = {
   normal_custom_conflict: "Kolejna trasa lub termin wymaga custom. Powrót do HA pominięto.",
   normal_interrupted: "Powrót do HA przerwany. Sprawdź bieżące źródło i stan bramki.",
   normal_unconfirmed: "Bramka nie potwierdziła powrotu do HA. Custom pozostaje wymagany.",
+  normal_authorization_required: "Brak ważnej zgody na automatyczny powrót tego wykonania. Sprawdź bieżący tryb; w razie potrzeby świadomie włącz HA GPS lub ponownie zatwierdź przyszłą trasę.",
   normal_cancelled: "Powrót do HA anulowany.",
 };
 const clone = (value) => structuredClone(value);

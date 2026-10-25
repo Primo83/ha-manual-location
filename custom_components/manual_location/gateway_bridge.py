@@ -49,6 +49,7 @@ class GatewayBridge:
         self.history_correction_supported = False
         self.history_correction_pending = False
         self.resume_supported = False
+        self.durable_resume_supported = False
 
     def invalidate(self):
         """A delayed normal grant must not survive a later close or failure."""
@@ -85,7 +86,7 @@ class GatewayBridge:
                 raw = bytearray()
                 async for chunk in response.content.iter_chunked(4096):
                     raw.extend(chunk)
-                    if len(raw) > 16384:
+                    if len(raw) > 131072:
                         raise GatewayError("invalid gateway response")
                 result = json.loads(raw)
                 if not isinstance(result, dict):
@@ -159,11 +160,40 @@ class GatewayBridge:
         if (type(resume_supported) is not bool or type(suspended) is not bool
                 or (resume_intent is not None and (not resume_supported or not isinstance(resume_intent, str)
                     or re.fullmatch(r"[A-Za-z0-9_-]{16,128}", resume_intent) is None))
-                or reason not in {None, "source_session_unavailable", "transport_unavailable", "native_outcome_unknown", "registration_changed"}
-                or (suspended and (reason not in {"source_session_unavailable", "transport_unavailable"} or resume_intent is None))
-                or (not suspended and reason in {"source_session_unavailable", "transport_unavailable"})):
+                or reason not in {None, "source_session_unavailable", "transport_unavailable", "native_outcome_unknown", "registration_changed", "gateway_restarted"}
+                or (suspended and (reason not in {"source_session_unavailable", "transport_unavailable", "gateway_restarted"} or resume_intent is None))
+                or (not suspended and reason in {"source_session_unavailable", "transport_unavailable", "gateway_restarted"})):
             raise GatewayError("invalid resume status")
         self.resume_supported = resume_supported
+        durable = result.get("durable_resume_supported", False)
+        authority = {}
+        if type(durable) is not bool:
+            raise GatewayError("invalid durable resume status")
+        if durable:
+            from .coordinator import LocationError, validate_normal_intent
+
+            scopes = result.get("authorization_scopes")
+            generation = result.get("authorization_generation")
+            active_id = result.get("authorization_active_id")
+            error = result.get("authorization_error")
+            restart_pending = result.get("restart_pending")
+            try:
+                if (not resume_supported or not isinstance(generation, str)
+                        or re.fullmatch(r"[A-Za-z0-9_-]{16,128}", generation) is None
+                        or not isinstance(scopes, list) or len(scopes) > 101
+                        or any(scope is None or validate_normal_intent(scope) != scope for scope in scopes)
+                        or len({scope["id"] for scope in scopes}) != len(scopes)
+                        or any(scope["person_id"] != self.person_id for scope in scopes)
+                        or (active_id is not None and active_id not in {scope["id"] for scope in scopes})
+                        or error not in {None, "missing", "corrupt", "write_failed"}
+                        or type(restart_pending) is not bool):
+                    raise ValueError
+            except (ValueError, TypeError, KeyError, LocationError):
+                raise GatewayError("invalid durable resume status") from None
+            authority = {"durable_resume_supported": True, "authorization_generation": generation,
+                         "authorization_scopes": scopes, "authorization_active_id": active_id,
+                         "authorization_error": error, "restart_pending": restart_pending}
+        self.durable_resume_supported = durable
         blocked = self.pending or self.history_correction_pending or result.get("upstream_uncertain") or result.get("replay_required") or result.get("recovery_retryable")
         return {"enabled": True, "available": True, "person_id": self.person_id,
                 "mode": "blocked" if blocked else result["mode"],
@@ -180,7 +210,23 @@ class GatewayBridge:
                 "last_custom_receipt": custom, "last_phone_receipt": phone,
                 "scheduled_return_supported": supported, "scheduled_return": plan,
                 "custom_point_digest": digest,
-                "handoff_supported": handoff_supported, "handoff": handoff}
+                "handoff_supported": handoff_supported, "handoff": handoff, **authority}
+
+    async def authorizations(self, body, *, expected_active_id=None):
+        """Retry only the identical CAS; never silently rebase an old write."""
+        try:
+            result = await self._request("/control/authorizations", body)
+        except GatewayError:
+            result = await self._request("/control/authorizations", body)
+        self._status(result)
+        status = await self.status()
+        target = sorted(body["scopes"], key=lambda scope: scope["id"])
+        if (not status.get("durable_resume_supported") or status.get("authorization_error") is not None
+                or status["authorization_generation"] == body["expected_generation"]
+                or status["authorization_active_id"] != expected_active_id
+                or sorted(status["authorization_scopes"], key=lambda scope: scope["id"]) != target):
+            raise GatewayError("authorization write unconfirmed")
+        return status
 
     async def handoff(self, key, expected_id):
         self.invalidate()
@@ -266,7 +312,8 @@ class GatewayBridge:
         })
         status = self._status(result)
         if (status["mode"] not in {"warmup", "normal"}
-                or (intent_id is not None and (not status["resume_supported"] or status["resume_intent_id"] != intent_id))):
+                or (intent_id is not None and (not status["resume_supported"] or status["resume_intent_id"] != intent_id))
+                or (status.get("durable_resume_supported") and status["authorization_active_id"] != intent_id)):
             raise GatewayError("normal mode unconfirmed")
 
     async def resume(self, key, intent_id, *, expected_id):
@@ -279,7 +326,8 @@ class GatewayBridge:
         })
         status = self._status(result)
         if (self.session != session or status["mode"] not in {"normal", "warmup"}
-                or status["suspended"] or status["resume_intent_id"] != intent_id):
+                or status["suspended"] or status["resume_intent_id"] != intent_id
+                or (status.get("durable_resume_supported") and status["authorization_active_id"] != intent_id)):
             raise GatewayError("resume unconfirmed")
         return status
 

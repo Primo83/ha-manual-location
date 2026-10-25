@@ -156,6 +156,7 @@ export function errorText(error) {
     return_limit: "Osiągnięto limit przyszłych terminów. Usuń niepotrzebny ręczny termin przed dodaniem kolejnego.",
     gateway_return_unavailable: "Termin wymaga bramki z obsługą automatycznego powrotu. Sprawdź jej wersję i połączenie.",
     gateway_return_unconfirmed: "Nie potwierdzono zakończenia przełączenia lub zapisu terminu. Sprawdź stan przed ponowną próbą; szkic pozostał w formularzu.",
+    gateway_authorization_unconfirmed: "Nie potwierdzono trwałego uprawnienia bramki. Część ustawień mogła zostać zapisana. Odśwież stan i sprawdź wybrane źródło oraz harmonogram przed ponowieniem; ten komunikat nie potwierdza włączenia GPS ani zakończenia zmiany.",
     gateway_return_recovering: "Trwa powrót do custom. Poczekaj na potwierdzenie własnej pozycji przed zmianą terminu.",
     gateway_return_requires_custom: "Najpierw zapisz własną pozycję i potwierdź ją w trybie custom. Termin korzysta z zapisanej pozycji.",
     return_own_unconfirmed: "Własny punkt nie jest potwierdzony. Wybierz „Ręczna (custom)” i „Zapisz wszystkie zmiany”, aby go potwierdzić, a następnie zapisz termin.",

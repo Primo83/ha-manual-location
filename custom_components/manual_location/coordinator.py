@@ -1,6 +1,8 @@
 """Persistent manual positions and connection-bound administrative sessions."""
 
 import asyncio
+import hashlib
+import json
 from copy import deepcopy
 from dataclasses import dataclass
 from datetime import UTC, date, datetime, timedelta
@@ -171,7 +173,7 @@ def validate_scenarios(hass, scenarios: object) -> dict:
         if (
             not isinstance(key, str) or not 1 <= len(key) <= 120
             or set(scenario) - {"routing", "auto_custom", "auto_ha", "run_start_cursor", "run_id",
-                               "switch_cursor", "switch_state"} != new_fields
+                               "switch_cursor", "switch_state", "normal_intent"} != new_fields
             or not isinstance(scenario["entity_id"], str) or not scenario["entity_id"].startswith("person.")
             or not isinstance(scenario["name"], str) or not 1 <= len(scenario["name"].strip()) <= 80
             or scenario["status"] not in {"draft", "running", "stopped", "completed"}
@@ -198,6 +200,11 @@ def validate_scenarios(hass, scenarios: object) -> dict:
                     or state["normal"] not in {"pending", "attempting", "started", "done", "skipped", "off"}
                     or not isinstance(state["reason"], str) or len(state["reason"]) > 80
                     or (state["custom"] == "pending" and not scenario.get("run_id"))):
+                raise LocationError("invalid_input")
+        if "normal_intent" in scenario:
+            scope = validate_normal_intent(scenario["normal_intent"])
+            if scope is not None and (scope.get("run_id") != scenario.get("run_id")
+                                      or scope.get("scope_digest") != route_scope_digest(scenario)):
                 raise LocationError("invalid_input")
         if "routing" in scenario:
             routing = scenario_routing(scenario["routing"])
@@ -344,13 +351,28 @@ def validate_persons(hass, persons: object, previous: dict, now: datetime, *, ch
 def validate_normal_intent(value):
     if value is None:
         return None
-    if (not isinstance(value, dict) or set(value) != {"id", "person_id", "tracker_id", "phone_entry_id"}
+    fields = {"id", "person_id", "tracker_id", "phone_entry_id"}
+    if (not isinstance(value, dict) or set(value) not in (fields, fields | {"run_id", "scope_digest"})
             or not isinstance(value["id"], str) or re.fullmatch(r"[A-Za-z0-9_-]{16,128}", value["id"]) is None
             or any(not isinstance(value[key], str) or not valid_entity_id(value[key]) for key in ("person_id", "tracker_id"))
             or not value["person_id"].startswith("person.") or not value["tracker_id"].startswith("device_tracker.")
             or not isinstance(value["phone_entry_id"], str) or not 1 <= len(value["phone_entry_id"]) <= 128):
         raise LocationError("invalid_input")
+    if "run_id" in value and (
+        not isinstance(value["run_id"], str) or re.fullmatch(r"[a-f0-9]{32}", value["run_id"]) is None
+        or not isinstance(value["scope_digest"], str) or re.fullmatch(r"[a-f0-9]{64}", value["scope_digest"]) is None
+    ):
+        raise LocationError("invalid_input")
     return deepcopy(value)
+
+
+def route_scope_digest(route):
+    """Bind a future permission to the approved run and its timed geometry."""
+    value = [route["entity_id"], route.get("run_id"), route.get("run_start_cursor", 0),
+             route.get("switch_cursor", route["cursor"]), route.get("auto_custom", True),
+             route.get("auto_ha", False),
+             [{key: point[key] for key in ("latitude", "longitude", "timestamp")} for point in route["points"]]]
+    return hashlib.sha256(json.dumps(value, sort_keys=True, separators=(",", ":"), allow_nan=False).encode()).hexdigest()
 
 
 @dataclass
@@ -392,6 +414,9 @@ class ManualLocation:
         self._gateway_retry_cancel = None
         self._gateway_applied = None
         self.source_schedule = SourceSchedule(self)
+        self._reconciled = False
+        self._authorization_witness = None
+        self._recovery_expected_at = None
 
     @property
     def location_history(self):
@@ -424,30 +449,152 @@ class ManualLocation:
         if (intent is None or self.gateway is None or not self.data["enabled"]
                 or self.data["persons"].get(self.gateway.person_id, {}).get("enabled", True)):
             return False
-        try:
-            return all(intent[key] == value for key, value in self._normal_identity().items())
-        except LocationError:
+        return self._scope_identity_valid(intent)
+
+    def _scope_identity_valid(self, scope):
+        if scope is None:
             return False
+        try:
+            validate_normal_intent(scope)
+        except (LocationError, KeyError):
+            return False
+        if self.gateway is None or scope["person_id"] != self.gateway.person_id:
+            return False
+        registry = er.async_get(self.hass)
+        entry = registry.async_get(scope["tracker_id"])
+        if (entry is None or entry.platform != "mobile_app" or entry.disabled_by is not None
+                or entry.config_entry_id != scope["phone_entry_id"]):
+            return False
+        state = self.hass.states.get(scope["person_id"])
+        assigned = state.attributes.get("device_trackers") if state is not None else None
+        if not isinstance(assigned, (list, tuple)):
+            # Missing live state is not evidence of a changed registration.
+            # async_ready still requires live person/tracker states to open GPS.
+            return True
+        candidates = [entity_id for entity_id in assigned
+                      if (bound := registry.async_get(entity_id)) is not None
+                      and bound.platform == "mobile_app" and bound.disabled_by is None]
+        return candidates == [scope["tracker_id"]]
+
+    def _new_route_intent(self, route):
+        return {**self._new_normal_intent(), "run_id": route["run_id"], "scope_digest": route_scope_digest(route)}
+
+    def _route_intent_valid(self, route):
+        scope = route.get("normal_intent")
+        return bool(self._scope_identity_valid(scope) and scope.get("run_id") == route.get("run_id")
+                    and scope.get("scope_digest") == route_scope_digest(route))
+
+    def _authorization_scopes(self, snapshot):
+        """Desired scopes are a filter, never authority to mint missing rights."""
+        if self.gateway is None or not snapshot["enabled"]:
+            return []
+        scopes = {}
+        current = snapshot.get("normal_intent")
+        if (not snapshot["persons"].get(self.gateway.person_id, {}).get("enabled", True)
+                and self._scope_identity_valid(current)):
+            scopes[current["id"]] = current
+        for route in snapshot["scenarios"].values():
+            if (route["entity_id"] == self.gateway.person_id and route.get("auto_ha")
+                    and route["status"] in {"running", "completed"}
+                    and route.get("switch_state", {}).get("normal") in {"pending", "attempting", "started"}
+                    and self._route_intent_valid(route)):
+                scope = route["normal_intent"]
+                scopes[scope["id"]] = scope
+        return [deepcopy(scopes[key]) for key in sorted(scopes)]
+
+    def _authorization_body(self, status, phase, scopes, revision):
+        target = sorted(scopes, key=lambda scope: scope["id"])
+        generation = status["authorization_generation"]
+        return {"source_session": self.gateway.session,
+                "idempotency_key": self.gateway.key(revision, "authorizations-" + phase,
+                                                     {"generation": generation, "scopes": target}),
+                "expected_generation": generation, "phase": phase, "scopes": target}
+
+    async def _async_restrict_authorizations(self, snapshot, *, force=False):
+        if self.gateway is None or not self.gateway.durable_resume_supported:
+            return
+        status = await self.gateway.status()
+        desired = self._authorization_scopes(snapshot)
+        existing = status["authorization_scopes"]
+        target = [scope for scope in existing if scope in desired]
+        if force or len(target) != len(existing):
+            body = self._authorization_body(status, "restrict", target, snapshot["revision"])
+            active_id = status["authorization_active_id"]
+            await self.gateway.authorizations(body, expected_active_id=active_id
+                                             if any(scope["id"] == active_id for scope in target) else None)
+
+    async def _async_grant_authorizations(self, new_ids):
+        """Only the live explicit writer may introduce its newly generated IDs."""
+        if not new_ids or self.gateway is None or not self.gateway.durable_resume_supported:
+            return
+        status = await self.gateway.status()
+        desired = self._authorization_scopes(self.data)
+        existing = status["authorization_scopes"]
+        # The restriction happened before Store. A concurrent change cannot be
+        # rebased into this explicit grant or resurrect a missing old route.
+        if any(scope not in desired for scope in existing):
+            raise GatewayError("authorization scope changed")
+        target = existing + [scope for scope in desired if scope["id"] in new_ids and scope not in existing]
+        if len(target) == len(existing):
+            return
+        body = self._authorization_body(status, "grant", target, self.data["revision"])
+        self._authorization_witness = deepcopy(body)
+        try:
+            await self.gateway.authorizations(body, expected_active_id=status["authorization_active_id"])
+        finally:
+            self._authorization_witness = None
+
+    def _recovery_overdue(self, status):
+        desired = self._normal_intent_valid()
+        working = status.get("mode") == "normal" and not status.get("suspended")
+        if not desired or working:
+            self._recovery_expected_at = None
+            return False
+        if self._recovery_expected_at is None:
+            self._recovery_expected_at = time.monotonic() + max(300, status.get("remaining_seconds", 0))
+        return time.monotonic() >= self._recovery_expected_at + 300
 
     async def async_gateway_control_state(self):
+        history_ready = await self.location_history.async_ready()
+        # Re-read the authority after the await. This callback intentionally
+        # does not acquire the writer lock: Gateway calls it during writes.
         try:
             identity = self._normal_identity()
         except LocationError:
             identity = {"person_id": self.gateway.person_id, "tracker_id": None, "phone_entry_id": None}
         desired = self._normal_intent_valid()
-        ready = self.loaded and identity["tracker_id"] is not None and await self.location_history.async_ready()
+        ready = self.loaded and identity["tracker_id"] is not None and history_ready
         ready = ready and not self.location_history.correction_active and not self.data.get("return_schedule", {}).get("journal")
+        if self.gateway.durable_resume_supported:
+            now = datetime.now(UTC)
+            due_points = any(route["entity_id"] == self.gateway.person_id and route["status"] == "running"
+                             and timestamp(route["points"][route["cursor"]]["timestamp"]) <= now
+                             for route in self.data["scenarios"].values())
+            ready = ready and self._reconciled and self.hass.state == CoreState.running and not due_points
+            ready = ready and not any(item["at"] <= now.timestamp() for item in self.source_schedule.events())
         return {"session": self.gateway.session,
                 "core_boot": self.hass.data.setdefault(f"{DOMAIN}_core_boot", secrets.token_urlsafe(32)),
                 "normal_intent_id": self.data["normal_intent"]["id"] if desired else None,
-                "normal_desired": desired, "resume_ready": bool(ready), **identity}
+                "normal_desired": desired, "resume_ready": bool(ready), **identity,
+                "normal_intent": deepcopy(self.data.get("normal_intent")) if desired else None,
+                "authorization_witness": deepcopy(self._authorization_witness)}
 
     async def _async_gateway_resume(self, status):
         """Restore only the matching live Gateway entitlement; never create consent."""
         if not self._normal_intent_valid() or not status.get("resume_supported"):
             return False
         intent = deepcopy(self.data["normal_intent"])
-        if status.get("resume_intent_id") != intent["id"]:
+        activate = False
+        if self.gateway.durable_resume_supported:
+            if intent not in status.get("authorization_scopes", []):
+                return False
+            active_id = status.get("authorization_active_id")
+            if active_id not in {None, intent["id"]}:
+                return False
+            activate = active_id is None
+            if not self._reconciled:
+                return True  # Preserve the choice while startup reconciles custom and routes.
+        if not activate and status.get("resume_intent_id") != intent["id"]:
             return False
         if (status.get("history_correction_pending") or self.location_history.correction_active
                 or any(status.get(key) for key in ("upstream_uncertain", "recovery_retryable", "replay_required"))
@@ -479,7 +626,11 @@ class ManualLocation:
         await self.location_history.begin_normal(operation, intent_id=intent["id"])
         plan = status.get("scheduled_return")
         try:
-            status = await self.gateway.resume(operation, intent["id"], expected_id=plan["id"] if plan else None)
+            if activate:
+                await self.gateway.normal(operation, intent_id=intent["id"], expected_id=plan["id"] if plan else None)
+                status = await self.gateway.status()
+            else:
+                status = await self.gateway.resume(operation, intent["id"], expected_id=plan["id"] if plan else None)
             if not self._normal_intent_valid() or self.data["normal_intent"] != intent or self.gateway.session != session:
                 raise GatewayError("resume intent changed")
         except BaseException:
@@ -523,12 +674,14 @@ class ManualLocation:
         if self.gateway.handoff_supported or self.gateway.resume_supported or not self.gateway.ready:
             try:
                 status = await self.gateway.status()
+                self._recovery_overdue(status)
                 if await self._async_gateway_resume(status):
                     return
                 if status.get("handoff_supported"):
                     preserve_normal = self._normal_intent_valid() and (status.get("scheduled_return") or {}).get("state") not in {"due", "applied"}
                     await self._async_gateway_handoff_reconcile(status, preserve_normal=preserve_normal)
             except GatewayError:
+                self._recovery_overdue({})
                 self._gateway_failed()
                 return
         current = self._gateway_current(self.data)
@@ -564,6 +717,10 @@ class ManualLocation:
                         self._schedule_gateway_retry()
                         return
                 try:
+                    if self.gateway.durable_resume_supported:
+                        await self._async_run_due_locked(datetime.now(UTC))
+                        if not self._reconciled:
+                            return
                     await self._async_gateway_sync()
                     await self.location_history.async_recover()
                     if self.gateway.return_supported:
@@ -789,7 +946,9 @@ class ManualLocation:
             result["current"] = await self.location_history.async_current()
             result["desired_source"] = "off" if not self.data["enabled"] else ("custom" if self.data["persons"].get(self.gateway.person_id, {}).get("enabled", True) else "normal")
             result["resume_available"] = bool(self._normal_intent_valid() and result.get("resume_intent_id") == self.data["normal_intent"]["id"])
-            result.pop("resume_intent_id", None)
+            result["recovery_overdue"] = self._recovery_overdue(result)
+            for key in ("resume_intent_id", "authorization_generation", "authorization_scopes", "authorization_active_id"):
+                result.pop(key, None)
             self.require_session(connection, token)
             return self.source_schedule.status(result)
         except GatewayError:
@@ -799,6 +958,7 @@ class ManualLocation:
                     "mode": "blocked", "pending": True, "gps_blocked": False, "remaining_seconds": 0,
                     "desired_source": "off" if not self.data["enabled"] else ("custom" if self.data["persons"].get(self.gateway.person_id, {}).get("enabled", True) else "normal"),
                     "resume_supported": self.gateway.resume_supported, "resume_available": False,
+                    "recovery_overdue": self._recovery_overdue({}),
                     "suspended": False, "suspend_reason": "transport_unavailable",
                     "has_custom_point": False, "replay_required": False, "upstream_uncertain": False,
                     "recovery_retryable": False, "last_custom_receipt": None, "last_phone_receipt": None,
@@ -868,16 +1028,24 @@ class ManualLocation:
             finally:
                 self._reschedule()
 
-    async def _async_cancel_route_warmup(self, previous, replacement):
-        if (self.gateway is None or not previous
-                or previous.get("switch_state", {}).get("normal") not in {"attempting", "started"}):
+    async def _async_cancel_route_warmup(self, previous, replacement, *, preserve_current=False):
+        if self.gateway is None or not previous:
+            return
+        durable_current = (self.gateway.durable_resume_supported and previous.get("normal_intent") is not None
+                           and previous.get("normal_intent") == self.data.get("normal_intent")
+                           and self._normal_intent_valid())
+        if self.gateway.durable_resume_supported and not durable_current:
+            return
+        if not durable_current and previous.get("switch_state", {}).get("normal") not in {"attempting", "started"}:
+            return
+        if preserve_current and durable_current and previous["status"] == "completed":
             return
         if replacement and replacement.get("auto_ha") and replacement.get("run_id") == previous.get("run_id"):
             return
         status = await self.gateway.status()
         suspended_intent = (status.get("suspended") and self._normal_intent_valid()
                             and status.get("resume_intent_id") == self.data["normal_intent"]["id"])
-        if status["mode"] == "warmup" or suspended_intent:
+        if durable_current or status["mode"] == "warmup" or suspended_intent:
             await self.source_schedule.enter_custom(status)
             if replacement is not None:
                 replacement["switch_state"].update(normal="off" if not replacement.get("auto_ha") else "skipped",
@@ -1241,7 +1409,7 @@ class ManualLocation:
         if revision != self.data["revision"]:
             raise LocationError("revision_conflict")
 
-    async def _commit(self, snapshot, *, gateway_normal=False):
+    async def _commit(self, snapshot, *, gateway_normal=False, authorization_grants=(), authorization_fence=False):
         """Commit history/current/cursors together and confirm actual persistence."""
         self._require_loaded()
         if self._location_history is not None and self._location_history.correction_active:
@@ -1255,6 +1423,9 @@ class ManualLocation:
                 snapshot["normal_intent"] = None
             else:
                 snapshot["normal_intent"] = deepcopy(self.data.get("normal_intent"))
+        new_ids = set(authorization_grants)
+        if gateway_normal and snapshot.get("normal_intent") is not None:
+            new_ids.add(snapshot["normal_intent"]["id"])
         await self._async_gateway_target_guard(snapshot)
         if (self._location_history is not None
                 and self._location_history.db is not None and self._location_history.db.pending):
@@ -1264,7 +1435,15 @@ class ManualLocation:
             if (scenario := snapshot["scenarios"].get(scenario_id)) and scenario["status"] == "running":
                 scenario.update(status="stopped", reason="storage_error")
         validate_running_intervals(snapshot["scenarios"])
-        if (self.gateway is not None and self.gateway.handoff_supported
+        restriction_failed = False
+        try:
+            await self._async_restrict_authorizations(snapshot, force=authorization_fence)
+        except GatewayError:
+            # Persist the removal in HA even when Gateway cannot durably write
+            # its marker. Both old copies must not silently remain authoritative.
+            restriction_failed = True
+            self._gateway_failed()
+        if (not restriction_failed and self.gateway is not None and self.gateway.handoff_supported
                 and self._gateway_current(snapshot) is not None
                 and not self.data["persons"].get(self.gateway.person_id, {}).get("enabled", True)):
             status = await self.gateway.status()
@@ -1287,7 +1466,7 @@ class ManualLocation:
         if self.gateway is not None and (gateway_changed or gateway_close or gateway_normal):
             # Invalidate the old normal epoch before touching persistent data.
             await self._async_gateway_close(snapshot["revision"])
-        if (gateway_normal and self.data["persons"].get(self.gateway.person_id, {}).get("enabled")):
+        if (not restriction_failed and gateway_normal and self.data["persons"].get(self.gateway.person_id, {}).get("enabled")):
             # A previously committed explicit Own remains authoritative across
             # a failed index fence. Clear its old phone pointer before opening
             # a new period, while repeated Normal retains its accepted baseline.
@@ -1297,12 +1476,20 @@ class ManualLocation:
             raise LocationError("storage_error")
         self._require_loaded()
         self.data = snapshot
+        if restriction_failed:
+            raise LocationError("gateway_authorization_unconfirmed")
+        try:
+            await self._async_grant_authorizations(new_ids)
+        except GatewayError:
+            self._gateway_failed()
+            raise LocationError("gateway_authorization_unconfirmed") from None
         if (self.gateway is not None and gateway_changed and self._gateway_current(snapshot) is not None):
             await self.location_history.async_own_current()
         self._retry_at = None
         self._storage_attempts = 0
         self._suspended.clear()
-        if self.gateway is not None and (gateway_changed or self.gateway.pending):
+        if (self.gateway is not None and (gateway_changed or self.gateway.pending)
+                and not (gateway_normal and self.gateway.durable_resume_supported)):
             await self._async_gateway_sync()
 
     async def async_save(self, connection, token, revision, enabled, persons, *, quick_save=_UNSET, activity=_UNSET, gateway_mode=_UNSET):
@@ -1360,7 +1547,7 @@ class ManualLocation:
                 changed_person = snapshot["persons"].get(entity_id) != self.data["persons"].get(entity_id)
                 if (scenario["status"] == "completed"
                         and scenario.get("switch_state", {}).get("normal") in {"pending", "attempting", "started"}
-                        and (not enabled or changed_person)):
+                        and (not enabled or changed_person or gateway_mode == "normal")):
                     scenario["switch_state"].update(normal="skipped", reason="normal_interrupted")
                 if scenario["status"] == "running":
                     if not enabled:
@@ -1370,7 +1557,10 @@ class ManualLocation:
             if (gateway_mode == "normal" and "return_schedule" in self.data
                     and self.source_schedule.conflict(snapshot, datetime.now(UTC))):
                 raise LocationError("return_custom_conflict")
-            await self._commit(snapshot, gateway_normal=gateway_mode == "normal")
+            await self._commit(snapshot, gateway_normal=gateway_mode == "normal",
+                               authorization_fence=not enabled or gateway_mode == "normal" or explicit_own
+                               or (self.gateway is not None and snapshot["persons"].get(self.gateway.person_id, {}).get("enabled")
+                                   != self.data["persons"].get(self.gateway.person_id, {}).get("enabled")))
             if explicit_own and self.gateway is not None and self._gateway_current(snapshot) is not None:
                 await self.location_history.async_own_current()
             if gateway_mode == "normal" and self.gateway.ready and not self.gateway.pending:
@@ -1452,6 +1642,9 @@ class ManualLocation:
                 "status": status, "cursor": cursor, "reason": reason,
             }
             saved = snapshot["scenarios"][scenario_id]
+            authorization_grants = set()
+            if previous and "normal_intent" in previous:
+                saved["normal_intent"] = deepcopy(previous["normal_intent"])
             if modern or previous and "run_start_cursor" in previous:
                 saved.update(auto_custom=custom_option, auto_ha=ha_option,
                              run_start_cursor=previous.get("run_start_cursor", 0) if previous else 0,
@@ -1465,6 +1658,11 @@ class ManualLocation:
                 if status == "running" and changed_schedule:
                     saved.update(run_id=secrets.token_hex(16), switch_cursor=cursor,
                                  switch_state=switch_state(custom_option, ha_option))
+                if changed_schedule:
+                    saved.pop("normal_intent", None)
+                    if status == "running" and ha_option and self.gateway.durable_resume_supported:
+                        saved["normal_intent"] = self._new_route_intent(saved)
+                        authorization_grants.add(saved["normal_intent"]["id"])
             if normalized_routing is not None:
                 snapshot["scenarios"][scenario_id]["routing"] = normalized_routing
             if status == "running":
@@ -1478,7 +1676,7 @@ class ManualLocation:
             if await self._async_cancel_route_warmup(previous, saved):
                 snapshot["persons"][self.gateway.person_id] = deepcopy(self.data["persons"][self.gateway.person_id])
                 snapshot["revision"] = self.data["revision"] + 1
-            await self._commit(snapshot)
+            await self._commit(snapshot, authorization_grants=authorization_grants)
             if self.gateway is not None and "return_schedule" in self.data:
                 await self.source_schedule.tick()
             self._reschedule()
@@ -1517,6 +1715,10 @@ class ManualLocation:
         )
         for scenario_id, scenario in running:
             entity_id = scenario["entity_id"]
+            if (snapshot["enabled"] and self.gateway is not None and self.gateway.durable_resume_supported
+                    and entity_id == self.gateway.person_id and self.hass.states.get(entity_id) is None):
+                self._retry_at = now + timedelta(seconds=5)
+                continue  # A missing live person during startup does not cancel saved route consent.
             pending_at = timestamp(scenario["points"][scenario["cursor"]]["timestamp"])
             if pending_at > now:
                 # A waiting route may intentionally remain in HA until its own deadline.
@@ -1577,7 +1779,7 @@ class ManualLocation:
                 raise LocationError("scenario_missing")
             entity_id = scenario["entity_id"]
             if action == "delete":
-                if await self._async_cancel_route_warmup(scenario, None):
+                if await self._async_cancel_route_warmup(scenario, None, preserve_current=True):
                     snapshot["persons"][self.gateway.person_id] = deepcopy(self.data["persons"][self.gateway.person_id])
                     snapshot["revision"] = self.data["revision"]
                 del snapshot["scenarios"][scenario_id]
@@ -1608,6 +1810,12 @@ class ManualLocation:
                                 run_id=secrets.token_hex(16), switch_cursor=scenario["cursor"],
                                 auto_custom=scenario.get("auto_custom", True), auto_ha=scenario.get("auto_ha", False),
                                 switch_state=switch_state(scenario.get("auto_custom", True), scenario.get("auto_ha", False)))
+                scenario.pop("normal_intent", None)
+                authorization_grants = set()
+                if (self.gateway is not None and self.gateway.durable_resume_supported
+                        and entity_id == self.gateway.person_id and scenario["auto_ha"]):
+                    scenario["normal_intent"] = self._new_route_intent(scenario)
+                    authorization_grants.add(scenario["normal_intent"]["id"])
                 if (self.gateway is not None and entity_id == self.gateway.person_id
                         and self.gateway.return_supported):
                     snapshot.setdefault("return_schedule", empty_schedule())
@@ -1619,7 +1827,7 @@ class ManualLocation:
                     if self.gateway is None:
                         self._advance_scenarios(snapshot, datetime.now(UTC))
                     snapshot["revision"] += 1
-                    await self._commit(snapshot)
+                    await self._commit(snapshot, authorization_grants=authorization_grants)
                     if self.gateway is not None:
                         await self.source_schedule.tick()
                         snapshot = deepcopy(self.data)
@@ -1634,7 +1842,7 @@ class ManualLocation:
                 self._reschedule()
                 return self._snapshot()
             snapshot["revision"] += 1
-            await self._commit(snapshot)
+            await self._commit(snapshot, authorization_fence=True)
             if self.gateway is not None and "return_schedule" in self.data:
                 await self.source_schedule.tick()
             self._reschedule()
@@ -1657,6 +1865,7 @@ class ManualLocation:
         await self._async_begin()
 
     async def _async_begin(self):
+        self._reconciled = False
         if self.gateway is not None:
             async with self._save_lock:
                 if not self._normal_intent_valid():
@@ -1671,6 +1880,8 @@ class ManualLocation:
                     if self.location_history.db is not None and self.location_history.db.pending:
                         self._gateway_failed()
         await self._async_run_due(datetime.now(UTC))
+        if self.gateway is None or not self.gateway.durable_resume_supported:
+            self._reconciled = True
         if self.gateway is not None:
             async with self._save_lock:
                 await self._async_gateway_sync()
@@ -1706,56 +1917,84 @@ class ManualLocation:
 
     async def _async_run_due(self, now):
         async with self._save_lock:
-            if not self.loaded:
-                return
-            if self._location_history is not None and self._location_history.correction_active:
-                self._schedule_gateway_retry()
-                return
-            try:
-                await self._async_gateway_return_preflight()
-                if self.gateway is not None:
-                    await self.source_schedule.tick()
-            except Exception:
-                if self.gateway is not None:
-                    self._gateway_failed()
-                self._retry_at = datetime.now(UTC) + timedelta(seconds=5)
-                self._reschedule()
-                self._schedule_gateway_retry()
-                return
-            if (self._location_history is not None and self._location_history.db is not None
-                    and self._location_history.db.pending):
-                self._retry_at = datetime.now(UTC) + timedelta(seconds=5)
-                self._reschedule()
-                return
-            self._retry_at = None
-            # HA passes the originally requested deadline to this callback, even
-            # when it fires late. Catch up to actual UTC now in one transaction.
-            now = datetime.now(UTC)
-            snapshot = deepcopy(self.data)
-            if self._advance_scenarios(snapshot, now):
-                snapshot["revision"] += 1
-                try:
-                    await self._commit(snapshot)
-                    if self.gateway is not None:
-                        await self.source_schedule.tick()
-                except Exception:
-                    if not self.loaded:
-                        return
-                    self._storage_attempts += 1
-                    _LOGGER.error("Manual Location scenario storage unavailable; attempt %s", self._storage_attempts)
-                    if self._storage_attempts < SCENARIO_STORAGE_ATTEMPTS:
-                        self._retry_at = datetime.now(UTC) + timedelta(seconds=SCENARIO_RETRY_SECONDS)
-                    else:
-                        self._suspended.update(
-                            key for key, value in self.data["scenarios"].items() if value["status"] == "running"
-                        )
-                        stopped = deepcopy(self.data)
-                        stopped["revision"] += 1
-                        try:
-                            await self._commit(stopped)
-                        except Exception:
-                            _LOGGER.error("Manual Location scenario execution suspended until storage recovery")
+            await self._async_run_due_locked(now)
+
+    async def _async_run_due_locked(self, now):
+        if not self.loaded:
+            return
+        durable = self.gateway is not None and self.gateway.durable_resume_supported
+        now = datetime.now(UTC)
+        # A neutral retry must preserve readiness throughout Gateway's cold
+        # stability window. Lower the barrier only when real work is pending.
+        if durable and (
+            self.data.get("return_schedule", {}).get("journal")
+            or any(item["at"] <= now.timestamp() for item in self.source_schedule.events())
+            or any(route["entity_id"] == self.gateway.person_id and route["status"] == "running"
+                   and timestamp(route["points"][route["cursor"]]["timestamp"]) <= now
+                   for route in self.data["scenarios"].values())
+            or (self._location_history is not None and (self._location_history.correction_active
+                or (self._location_history.db is not None and self._location_history.db.pending)))
+        ):
+            self._reconciled = False
+        if self._location_history is not None and self._location_history.correction_active:
+            self._schedule_gateway_retry()
+            return
+        try:
+            await self._async_gateway_return_preflight()
+            if self.gateway is not None:
+                await self.source_schedule.tick(finish=not durable)
+        except Exception:
+            if self.gateway is not None:
+                self._gateway_failed()
+            self._retry_at = datetime.now(UTC) + timedelta(seconds=5)
             self._reschedule()
+            self._schedule_gateway_retry()
+            return
+        if (self._location_history is not None and self._location_history.db is not None
+                and self._location_history.db.pending):
+            self._retry_at = datetime.now(UTC) + timedelta(seconds=5)
+            self._reschedule()
+            return
+        self._retry_at = None
+        # HA passes the originally requested deadline to this callback, even
+        # when it fires late. Catch up to actual UTC now in one transaction.
+        now = datetime.now(UTC)
+        snapshot = deepcopy(self.data)
+        if self._advance_scenarios(snapshot, now):
+            snapshot["revision"] += 1
+            try:
+                await self._commit(snapshot)
+                if self.gateway is not None:
+                    await self.source_schedule.tick(finish=not durable)
+            except Exception:
+                if not self.loaded:
+                    return
+                self._storage_attempts += 1
+                _LOGGER.error("Manual Location scenario storage unavailable; attempt %s", self._storage_attempts)
+                if self._storage_attempts < SCENARIO_STORAGE_ATTEMPTS:
+                    self._retry_at = datetime.now(UTC) + timedelta(seconds=SCENARIO_RETRY_SECONDS)
+                else:
+                    self._suspended.update(
+                        key for key, value in self.data["scenarios"].items() if value["status"] == "running"
+                    )
+                    stopped = deepcopy(self.data)
+                    stopped["revision"] += 1
+                    try:
+                        await self._commit(stopped)
+                    except Exception:
+                        _LOGGER.error("Manual Location scenario execution suspended until storage recovery")
+                self._reschedule()
+                return
+        if durable:
+            self._reconciled = True
+            try:
+                await self.source_schedule.tick()
+                await self._async_gateway_sync()
+            except (GatewayError, LocationError):
+                self._reconciled = False
+                self._gateway_failed()
+                self._retry_at = datetime.now(UTC) + timedelta(seconds=5)
+        self._reschedule()
 
     async def async_shutdown(self):
         """Cancel timers/listeners and drain the one writer before unloading."""

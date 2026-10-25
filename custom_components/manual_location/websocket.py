@@ -1,6 +1,7 @@
 """WebSocket API with PIN-gated writes and minimal administrator alias discovery."""
 
 import logging
+from copy import deepcopy
 
 import voluptuous as vol
 
@@ -182,12 +183,13 @@ async def async_handle_command(hass, connection, msg):
         else:
             result = coordinator.lock(connection, msg["token"])
         if isinstance(result, dict):
-            result = dict(result)
-            result.pop("normal_intent", None)
-            result.pop("resume_intent_id", None)
-            if isinstance(result.get("snapshot"), dict):
-                result["snapshot"] = dict(result["snapshot"])
-                result["snapshot"].pop("normal_intent", None)
+            result = deepcopy(result)
+            for item in (result, result.get("snapshot", {})):
+                for key in ("normal_intent", "resume_intent_id", "authorization_generation",
+                            "authorization_scopes", "authorization_active_id", "authorization_witness"):
+                    item.pop(key, None)
+                for route in item.get("scenarios", {}).values():
+                    route.pop("normal_intent", None)
         connection.send_result(msg["id"], result)
     except LocationError as err:
         if operation == "refresh_location" and connection.user is not None and connection.user.is_admin:

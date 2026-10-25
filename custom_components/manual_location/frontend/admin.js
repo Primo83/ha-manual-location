@@ -1,8 +1,8 @@
-import { activityPayload, activitySettings, adminPersonOptions, callWS, editHistory, errorText, localDateInput, readPoint, removeHistory } from "./data.js?v=2.1.2";
-import { L, makeMap, mapStyles, popup } from "./map-common.js?v=2.1.2";
-import { registerReloadBlocker, startUpdateCheck } from "./updates.js?v=2.1.2";
-import "./scenarios.js?v=2.1.2";
-import "./place-search.js?v=2.1.2";
+import { activityPayload, activitySettings, adminPersonOptions, callWS, editHistory, errorText, localDateInput, readPoint, removeHistory } from "./data.js?v=2.2.0";
+import { L, makeMap, mapStyles, popup } from "./map-common.js?v=2.2.0";
+import { registerReloadBlocker, startUpdateCheck } from "./updates.js?v=2.2.0";
+import "./scenarios.js?v=2.2.0";
+import "./place-search.js?v=2.2.0";
 
 const DRAFT_COLOR = "#7c3aed";
 const CUSTOM_COLOR = "#1976d2";
@@ -571,6 +571,8 @@ export class ManualLocationAdmin extends HTMLElement {
       if (status.upstream_uncertain || status.history_correction_pending || status.pending || status.replay_required || status.recovery_retryable) {
         return "GPS wstrzymany · sprawdzanie spójności danych";
       }
+      if (status.recovery_overdue) return "GPS nie został wznowiony · sprawdź stan poniżej";
+      if (status.restart_pending) return "GPS wstrzymany · przygotowanie po restarcie";
       return status.resume_available === true
         ? "GPS chwilowo wstrzymany · ponowne łączenie"
         : "GPS wstrzymany · wymagane ręczne włączenie";
@@ -578,7 +580,9 @@ export class ManualLocationAdmin extends HTMLElement {
     if (status.pending || status.replay_required || status.upstream_uncertain || status.recovery_retryable || status.mode === "blocked") return status.gps_blocked === true
       ? "GPS zablokowany · kończenie przełączenia" : "Nie potwierdzono blokady GPS · sprawdź połączenie";
     if (["custom", "warmup"].includes(status.mode) && status.gps_blocked !== true) return "Nie potwierdzono blokady GPS";
+    if (status.recovery_overdue && status.desired_source === "normal") return "GPS nie został wznowiony · sprawdź stan poniżej";
     if (status.mode === "custom" && status.desired_source === "normal" && status.resume_supported && !status.resume_available) return "GPS zablokowany · wymagane ręczne włączenie";
+    if (status.mode === "warmup" && status.restart_pending) return `GPS wstrzymany · stabilizacja po restarcie: ${Math.max(0, Math.ceil(Number(status.remaining_seconds) || 0))} s`;
     if (status.mode === "warmup") return `${status.has_custom_point ? "Ostatnia potwierdzona pozycja" : "GPS zablokowany"} · karencja ${Math.max(0, Math.ceil(Number(status.remaining_seconds) || 0))} s`;
     if (status.mode === "custom") return status.has_custom_point ? "Ręczna (custom) · GPS zablokowany" : "GPS zablokowany · brak własnego punktu";
     if (status.mode === "normal") {
@@ -616,6 +620,8 @@ export class ManualLocationAdmin extends HTMLElement {
     field("activity-title").textContent = `Aktywność telefonu: ${name}`;
     const gateway = this._gatewayFor(this._selected), gatewayLabel = this._gatewaySourceLabel(this._selected);
     field("person-source-status").textContent = gatewayLabel ? `Stan: ${gatewayLabel}` : `Zapisane na mapach: ${this._sourceLabel(saved, this._selected)}`;
+    field("person-source-status").classList.toggle("danger", gateway?.recovery_overdue === true);
+    field("person-source-status").setAttribute("role", gateway?.recovery_overdue ? "alert" : "status");
     const desired = field("person-source-desired");
     desired.hidden = !gateway?.desired_source;
     desired.textContent = gateway?.desired_source === "normal" ? "Wybrane źródło: HA GPS"
@@ -655,6 +661,14 @@ export class ManualLocationAdmin extends HTMLElement {
       : gateway && !this._snapshot.enabled ? "Po zapisaniu własne trasy zostaną zatrzymane i zostanie wysłane żądanie blokady GPS."
       : gateway && !person?.enabled ? this._gatewayNormalRequested === this._selected
         ? "Po zapisaniu zmian zacznie się 5-minutowa karencja. Dopiero potem Companion będzie mógł przesyłać lokalizację."
+        : gateway.durable_resume_supported && gateway.authorization_error && !gateway.resume_available
+          ? "Brak potwierdzonej zgody na automatyczne wznowienie. Może to nastąpić po pierwszej aktualizacji, przywróceniu kopii lub błędzie zapisu. Sprawdź stan i świadomie wybierz Home Assistant oraz zapisz zmiany. Samo odświeżenie nie włącza GPS."
+        : gateway.recovery_overdue
+          ? "Oczekiwane HA GPS nie zostało wznowione. Sprawdź połączenie bramki i przyczynę blokady. Bezpieczne próby odzyskania są ponawiane automatycznie; brak ważnej zgody wymaga ponownego zatwierdzenia."
+        : gateway.restart_pending && gateway.gps_blocked === true
+          ? gateway.mode === "warmup"
+            ? "Trwa 5-minutowa stabilizacja po restarcie urządzenia lub bramki. GPS wróci automatycznie, jeśli zgoda i harmonogram nadal na to pozwalają. Utrata gotowości rozpocznie odliczanie ponownie."
+            : "Trwa sprawdzanie danych i harmonogramu po restarcie. Następnie rozpocznie się 5-minutowa stabilizacja przed automatycznym wznowieniem GPS. Wybrany tryb pozostaje zapisany."
         : gateway.suspended && gateway.gps_blocked === true
           ? gateway.upstream_uncertain || gateway.history_correction_pending || gateway.pending || gateway.replay_required || gateway.recovery_retryable
             ? "GPS czeka na potwierdzenie spójności danych. Wznowienie nie nastąpi przed zakończeniem odzyskiwania."

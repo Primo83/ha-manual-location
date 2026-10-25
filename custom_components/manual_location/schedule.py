@@ -90,6 +90,12 @@ class SourceSchedule:
         """Metadata-only transaction; never publish positions or grant Normal."""
         owner = self.owner
         snapshot["revision"] = owner.data["revision"] + 1
+        restriction_failed = False
+        try:
+            await owner._async_restrict_authorizations(snapshot)
+        except GatewayError:
+            restriction_failed = True
+            owner._gateway_failed()
         try:
             await owner.store.async_save(snapshot)
         except Exception:
@@ -100,6 +106,10 @@ class SourceSchedule:
             raise LocationError("storage_error")
         owner._require_loaded()
         owner.data = snapshot
+        if restriction_failed:
+            from .coordinator import LocationError
+
+            raise LocationError("gateway_authorization_unconfirmed")
 
     async def initialize(self, status):
         owner = self.owner
@@ -230,7 +240,7 @@ class SourceSchedule:
                 return True
         return False
 
-    async def tick(self):
+    async def tick(self, *, finish=True):
         owner, gate = self.owner, self.owner.gateway
         self.custom_ready = gate is None
         if gate is None:
@@ -259,10 +269,14 @@ class SourceSchedule:
             await self.persist(snapshot)
         status = await self.sync(status)
         self.custom_ready = self.confirmed_custom(status)
-        await self.finish_routes(status)
+        if finish:
+            await self.finish_routes(status)
 
     async def finish_routes(self, status):
         owner, gate = self.owner, self.owner.gateway
+        if gate.durable_resume_supported:
+            await self._finish_durable_routes(status)
+            return
         now = datetime.now(UTC)
         for key, route in list(owner.data["scenarios"].items()):
             if route["entity_id"] != gate.person_id or route["status"] != "completed":
@@ -343,6 +357,87 @@ class SourceSchedule:
                 snapshot["normal_intent"] = None
                 await self.persist(snapshot)
                 raise
+
+    async def _finish_durable_routes(self, status):
+        """Reduce elapsed switches to one result before consuming any scope."""
+        owner, gate = self.owner, self.owner.gateway
+        now = datetime.now(UTC)
+        candidates = []
+        latest_custom = owner.data.get("return_schedule", {}).get("manual_cutoff_at") or 0
+        for key, route in owner.data["scenarios"].items():
+            if route["entity_id"] != gate.person_id or not route.get("run_id") or not route["points"]:
+                continue
+            state = route.get("switch_state", {})
+            anchor = route.get("switch_cursor", route.get("run_start_cursor", 0))
+            if anchor < len(route["points"]):
+                start = datetime.fromisoformat(route["points"][anchor]["timestamp"]).timestamp()
+                if state.get("custom") == "done":
+                    latest_custom = max(latest_custom, start - 300)
+                elif not route.get("auto_custom", True) and route["cursor"] > route.get("run_start_cursor", 0):
+                    latest_custom = max(latest_custom, start)
+            if route["status"] == "completed" and state.get("normal") in {"pending", "attempting", "started"}:
+                candidates.append((datetime.fromisoformat(route["points"][-1]["timestamp"]).timestamp(), key, route))
+        candidates.sort(key=lambda item: (item[0], item[1]))
+        winner = candidates[-1][1] if candidates else None
+        snapshot = deepcopy(owner.data)
+        changed = False
+        for final_at, key, route in candidates:
+            reason = None
+            if not owner.data["enabled"]:
+                reason = "normal_interrupted"
+            elif key != winner or latest_custom >= final_at or self.conflict(owner.data, now, exclude=key):
+                reason = "normal_custom_conflict"
+            elif (not route.get("auto_ha") or not owner._route_intent_valid(route)
+                  or route["normal_intent"] not in status.get("authorization_scopes", [])):
+                reason = "normal_authorization_required"
+            if reason:
+                snapshot["scenarios"][key]["switch_state"].update(normal="skipped", reason=reason)
+                if snapshot.get("normal_intent") == route.get("normal_intent"):
+                    snapshot["normal_intent"] = None
+                    snapshot["persons"][gate.person_id]["enabled"] = True
+                changed = True
+                if key == winner:
+                    winner = None
+        if changed:
+            await self.persist(snapshot)  # Also durably removes superseded, never-active scopes.
+            await owner._async_gateway_sync()
+            status = await gate.status()
+        else:
+            await owner._async_restrict_authorizations(owner.data)
+        if winner is None or not owner._reconciled:
+            return
+        route = owner.data["scenarios"][winner]
+        scope = route["normal_intent"]
+        if owner.data.get("normal_intent") == scope:
+            if (status.get("authorization_active_id") == scope["id"] and status["mode"] == "normal"
+                    and not status.get("suspended")):
+                snapshot = deepcopy(owner.data)
+                snapshot["scenarios"][winner]["switch_state"]["normal"] = "done"
+                await self.persist(snapshot)
+                return
+        else:
+            if not self.confirmed_custom(status) or owner._gateway_applied != owner._gateway_current(owner.data):
+                return
+            snapshot = deepcopy(owner.data)
+            snapshot["scenarios"][winner]["switch_state"]["normal"] = "attempting"
+            snapshot["persons"][gate.person_id]["enabled"] = False
+            snapshot["normal_intent"] = deepcopy(scope)
+            await self.persist(snapshot)
+            await owner.location_history.async_own_current()
+        try:
+            status = await gate.status()
+            if not await owner._async_gateway_resume(status):
+                raise GatewayError("route authorization unavailable")
+            status = await gate.status()
+            if status["mode"] in {"normal", "warmup"} and not status.get("suspended"):
+                snapshot = deepcopy(owner.data)
+                snapshot["scenarios"][winner]["switch_state"]["normal"] = "done" if status["mode"] == "normal" else "started"
+                await self.persist(snapshot)
+                self.normal_session[winner] = gate.session
+                owner._gateway_applied = None
+        except (GatewayError, asyncio.CancelledError):
+            owner._gateway_failed()
+            raise
 
     def check_normal_consent(self, key, run_id, source_session, final_at):
         """Recheck after every preparation await and after the grant response."""
