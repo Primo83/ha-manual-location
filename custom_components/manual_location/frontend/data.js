@@ -192,7 +192,7 @@ export function errorText(error) {
     history_too_large: "Zakres zawiera zbyt dużo historii na jedną operację. Wybierz krótszy przedział.",
     history_ambiguous: "Nie można jednoznacznie powiązać wpisów. Niczego nie usuwaj, dopóki historia nie zostanie sprawdzona.",
     history_assignment_changed: "Przypisanie telefonu zmieniło się. Historia wymaga sprawdzenia przed dalszym zapisem i usuwaniem.",
-    history_incompatible: "Ta wersja bazy historii HA nie została jeszcze sprawdzona. Usuwanie jest niedostępne.",
+    history_incompatible: "Ta wersja Home Assistanta wymaga zgodnej aktualizacji Manual Location.",
     history_invalid_input: "Sprawdź wybór wpisów oraz daty przedziału i przygotuj podgląd ponownie.",
     history_legacy_unsupported: "Wybrane stare wpisy mają nieobsługiwany format. Ich usunięcie wymaga osobnego sprawdzenia.",
     history_native_error: "HA nie potwierdził operacji na historii. Odśwież stan i sprawdź wynik.",

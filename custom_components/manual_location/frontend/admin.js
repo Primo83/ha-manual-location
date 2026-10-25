@@ -1,8 +1,8 @@
-import { activityPayload, activitySettings, adminPersonOptions, callWS, editHistory, errorText, localDateInput, readPoint, removeHistory } from "./data.js?v=2.2.0";
-import { L, makeMap, mapStyles, popup } from "./map-common.js?v=2.2.0";
-import { registerReloadBlocker, startUpdateCheck } from "./updates.js?v=2.2.0";
-import "./scenarios.js?v=2.2.0";
-import "./place-search.js?v=2.2.0";
+import { activityPayload, activitySettings, adminPersonOptions, callWS, editHistory, errorText, localDateInput, readPoint, removeHistory } from "./data.js?v=2.2.1";
+import { L, makeMap, mapStyles, popup } from "./map-common.js?v=2.2.1";
+import { registerReloadBlocker, startUpdateCheck } from "./updates.js?v=2.2.1";
+import "./scenarios.js?v=2.2.1";
+import "./place-search.js?v=2.2.1";
 
 const DRAFT_COLOR = "#7c3aed";
 const CUSTOM_COLOR = "#1976d2";
@@ -1015,7 +1015,13 @@ export class ManualLocationAdmin extends HTMLElement {
     } catch (error) {
       if (!this._haContextValid(request) || history !== this._haHistory) return;
       if (["invalid_token", "pin_required", "unauthorized", "forbidden"].includes(error?.code)) this._sessionError(errorText(error), error.code);
-      else { history.error = "Historia HA nie została wczytana w całości. Odśwież ją przed wyborem lub usuwaniem rekordów."; this._haSelection.clear(); }
+      else {
+        const reason = error?.code?.startsWith("history_") ? `${errorText(error)} ` : "";
+        history.error = reason + (this._displayCurrent()
+          ? "Bieżąca pozycja jest widoczna, ale starsza historia HA nie została wczytana w całości."
+          : "Historia HA nie została wczytana w całości.") + " Odśwież historię przed wyborem lub usuwaniem rekordów.";
+        this._haSelection.clear();
+      }
     } finally {
       if (this._haContextValid(request) && history === this._haHistory) {
         history.loading = false;
@@ -1059,7 +1065,10 @@ export class ManualLocationAdmin extends HTMLElement {
     this.shadowRoot.querySelector("#ha-delete-range-fields").hidden = !enabled;
     if (!enabled) return;
     const reasons = this._haBlockReasons(), allowed = reasons.length === 0;
-    this.shadowRoot.querySelector("#ha-history-status").textContent = history?.loading ? "Wczytywanie historii HA…"
+    const status = this.shadowRoot.querySelector("#ha-history-status");
+    status.classList.toggle("danger", !!history?.error);
+    status.setAttribute("role", history?.error ? "alert" : "status");
+    status.textContent = history?.loading ? "Wczytywanie historii HA…"
       : history?.supported === false ? "Historia HA niedostępna w tej wersji."
       : history?.error || `HA: ${history?.rows.length || 0} pobranych · zaznaczono ${this._haSelection.size}${history?.hasMore ? " · są kolejne wpisy" : ""}${history?.capturedAt ? ` · stan z ${new Date(history.capturedAt).toLocaleString()}` : ""}`;
     help.textContent = "Lista HA: dostępny zakres ostatnich 31 dni; domyślny widok 48 godzin. Starsze punkty Custom pozostają dostępne. Wiersz HA może być także publikacją pozycji Custom. "

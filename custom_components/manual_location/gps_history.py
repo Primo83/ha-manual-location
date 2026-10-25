@@ -443,7 +443,7 @@ class GpsHistory:
     def _native_instance(self):
         from homeassistant.const import __version__
         from homeassistant.helpers.recorder import get_instance
-        if __version__ != "2026.9.4":
+        if __version__ not in {"2026.9.4", "2026.10.3"}:
             raise GpsHistoryError("history_incompatible")
         try:
             instance = get_instance(self.hass)
