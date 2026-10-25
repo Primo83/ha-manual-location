@@ -69,7 +69,7 @@ class NativeHooks:
     async def check_control_session(self, expected):
         return await self._check_session(expected, control=True)
 
-    async def check_normal_intent(self, intent_id, source_session, *, opening=False):
+    async def check_normal_intent(self, intent_id, source_session, *, opening=False, scope=None):
         try:
             async with self.client.get(self.base_url + "/api/manual_location/gateway_session?control=1") as response:
                 if response.status != 200:
@@ -78,8 +78,25 @@ class NativeHooks:
             return (isinstance(value, dict) and value.get("session") == source_session
                     and value.get("normal_intent_id") == intent_id and value.get("normal_desired") is True
                     and (not opening or value.get("resume_ready") is True) and value.get("person_id") == self.person_id
-                    and value.get("tracker_id") == self.tracker_id)
+                    and value.get("tracker_id") == self.tracker_id
+                    and (scope is None or (value.get("normal_intent") == scope
+                        and scope.get("phone_entry_id") == value.get("phone_entry_id"))))
         except (aiohttp.ClientError, asyncio.TimeoutError, ValueError):
+            return False
+
+    async def check_authorizations(self, body):
+        try:
+            async with self.client.get(self.base_url + "/api/manual_location/gateway_session?control=1") as response:
+                if response.status != 200:
+                    return False
+                value = await response.json()
+            return (isinstance(value, dict) and value.get("session") == body["source_session"]
+                    and value.get("authorization_witness") == body
+                    and value.get("person_id") == self.person_id and value.get("tracker_id") == self.tracker_id
+                    and all(scope.get("person_id") == self.person_id
+                        and scope.get("tracker_id") == self.tracker_id
+                        and scope.get("phone_entry_id") == value.get("phone_entry_id") for scope in body["scopes"]))
+        except (aiohttp.ClientError, asyncio.TimeoutError, ValueError, KeyError, TypeError):
             return False
 
     async def _check_session(self, expected, *, control):

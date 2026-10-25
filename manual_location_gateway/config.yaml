@@ -1,5 +1,5 @@
 name: Manual Location Gateway
-version: "2.0.6"
+version: "2.1.0"
 slug: manual_location_gateway
 description: Bramka lokalizacji przed Home Assistant
 url: https://github.com/Primo83/ha-manual-location/tree/codex/gateway-apps
@@ -19,6 +19,8 @@ docker_api: false
 ingress: false
 watchdog: "http://[HOST]:18326/live"
 timeout: 30
+backup_exclude:
+  - "gateway-authorizations.json*"
 map:
   - type: app_config
     path: /bootstrap

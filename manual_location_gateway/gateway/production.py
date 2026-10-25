@@ -212,8 +212,9 @@ class RegistrationGuard:
     async def check(self):
         try:
             return await asyncio.to_thread(self._read) == self.baseline
-        except ConfigurationError:
-            return False
+        except ConfigurationError as error:
+            # Missing/unreadable files do not prove that the registered identity changed.
+            return None if str(error) == "REGISTRY_READ_FAILED" else False
 
     def require_unattached(self):
         if self._read(require_unattached=True) != self.baseline:
@@ -381,6 +382,9 @@ class Runtime:
             native_target=getattr(self.hooks, "native_target", None),
             correct_history=getattr(self.hooks, "correct_history", None),
             normal_intent_check=getattr(self.hooks, "check_normal_intent", None),
+            authorization_path=(self.data_dir / "gateway-authorizations.json"
+                if callable(getattr(self.hooks, "check_authorizations", None)) else None),
+            authorization_check=getattr(self.hooks, "check_authorizations", None),
             passthrough_webhooks=options.passthrough_webhooks, denied_webhooks=options.denied_webhooks,
             production_mode=True, max_ws_message_bytes=8 * 1024 * 1024,
             backend_ssl_server_hostname=options.public_host,

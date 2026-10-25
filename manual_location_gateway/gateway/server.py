@@ -59,6 +59,8 @@ from urllib.parse import urlsplit
 
 from aiohttp import ClientError, ClientSession, ClientTimeout, DummyCookieJar, WSMsgType, web
 
+from gateway.authorizations import Authorizations, MAX_AUTHORITY_BYTES, scopes as authorization_scopes
+
 _UNCHANGED = object()
 ACTIVITY_SENSORS = {
     "is_interactive": ("binary_sensor", "Interactive"),
@@ -154,7 +156,7 @@ class Gateway:
                  denied_webhooks=(), allowed_push_url=None, registration_guard=None, backend_ssl_context=None,
                  phone_snapshot=None, record_phone=None, wall_clock=time.time,
                  core_boot=None, query_phone=None, native_target=None, correct_history=None,
-                 normal_intent_check=None):
+                 normal_intent_check=None, authorization_path=None, authorization_check=None):
         if type(production_mode) is not bool:
             raise ValueError("production mode")
         self.production_mode = production_mode
@@ -187,7 +189,11 @@ class Gateway:
         if normal_intent_check is not None and not callable(normal_intent_check):
             raise ValueError("normal intent callback required")
         self.normal_intent_check = normal_intent_check
-        # Consent belongs to this process only. Never include these in _save.
+        # Admission grants remain process-local; durable permissions live outside backup.
+        self.authorization_check = authorization_check
+        self.authorizations = None
+        self.restart_pending = authorization_path is not None
+        self._restart_sample = None
         self.resume_entitlement = None
         self.used_normal_intents = set()
         self.suspended, self.suspend_reason = False, None
@@ -251,7 +257,21 @@ class Gateway:
         self._return_dirty = False
         self._handoff_dirty = False
         self._load_checkpoint()
-        self.app = web.Application(client_max_size=self.max_ws_message_bytes if production_mode else max_body_bytes)
+        if authorization_path is not None:
+            if not callable(authorization_check) or not self.handoff_enabled or normal_intent_check is None:
+                raise ValueError("durable authorization callbacks required")
+            self.authorizations = Authorizations(authorization_path, person_id, webhook_id)
+            active = self.authorizations.active
+            if (active is not None and not self.upstream_uncertain and not self.phone_pending
+                    and not self._handoff_pending() and not self.history_correction):
+                # A healthy phone baseline must not replay an older Own point at boot.
+                self.replay_required = False
+                self.resume_entitlement = {"intent_id": active, "deadline": self.clock() + self.warmup_seconds,
+                                           "sessions": set(), "grants": set()}
+                self.used_normal_intents.add(active)
+                self.suspended, self.suspend_reason = True, "gateway_restarted"
+        self.app = web.Application(client_max_size=max(MAX_AUTHORITY_BYTES,
+            self.max_ws_message_bytes if production_mode else max_body_bytes))
         self.app.router.add_route("*", "/{path:.*}", self._handle)
         self.app.on_startup.append(self._startup)
         self.app.on_cleanup.append(self._cleanup)
@@ -451,6 +471,8 @@ class Gateway:
 
     async def _recover_tick(self):
         self._expire_return()
+        if self.restart_pending and self.mode == "warmup" and self.resume_entitlement is not None:
+            await self._ensure_source_session()
         if self.history_correction is not None:
             async with self.lock:
                 try:
@@ -516,13 +538,31 @@ class Gateway:
         self._expire_return()
         if self.upstream_uncertain or self.history_correction is not None:
             return "custom"
-        if self.mode == "warmup" and self.normal_after is not None and self.clock() >= self.normal_after:
+        if (self.mode == "warmup" and not self.restart_pending and self.normal_after is not None
+                and self.clock() >= self.normal_after):
             self.mode = "normal"
         return self.mode
 
     def _authorized(self, request):
         expected = "Bearer " + self.control_token
         return hmac.compare_digest(request.headers.get("Authorization", ""), expected)
+
+    async def _check_normal_intent(self, intent_id, source_session, *, opening=False):
+        if self.authorizations is None:
+            return await self.normal_intent_check(intent_id, source_session, opening=opening)
+        scope = self.authorizations.scope(intent_id)
+        if scope is None or self.authorizations.error is not None:
+            return False
+        return await self.normal_intent_check(intent_id, source_session, opening=opening, scope=scope)
+
+    def _restart_clock_valid(self):
+        wall, mono = self.wall_clock(), self.clock()
+        if any(type(value) not in {int, float} or not math.isfinite(value) or value < 0 for value in (wall, mono)):
+            return False
+        previous = self._restart_sample
+        self._restart_sample = (wall, mono)
+        return previous is None or (0 <= mono - previous[1] <= max(10, 5 * self.recovery_retry_seconds)
+            and abs((wall - previous[0]) - (mono - previous[1])) <= 1)
 
     async def _ensure_source_session(self):
         expected = self._admission_identity()
@@ -538,26 +578,35 @@ class Gateway:
             valid = bool(self.source_session and (self.source_session_check is None
                          or await self.source_session_check(self.source_session)))
             if valid and self.resume_entitlement is not None:
-                valid = await self.normal_intent_check(self.resume_entitlement["intent_id"], self.source_session) is True
+                valid = await self._check_normal_intent(self.resume_entitlement["intent_id"], self.source_session,
+                                                        opening=self.restart_pending) is True
         except Exception:
             valid = False
         if expected != self._admission_identity():
             return False
+        if valid and self.restart_pending:
+            valid = self._restart_clock_valid()
         if not valid:
             self._suspend_native("source_session_unavailable")
+        elif self.restart_pending and self.normal_after is not None and self.clock() >= self.normal_after:
+            self.restart_pending = False
+            self.mode = "normal"
         return valid
 
     async def _ensure_registration(self):
         if self.registration_guard is None:
             return True
         try:
-            valid = await self.registration_guard() is True
+            valid = await self.registration_guard()
         except Exception:
-            valid = False
-        if not valid:
-            self._fail_native(reason="registration_changed")
+            valid = None
+        if valid is not True:
+            if self.authorizations is not None and valid is None:
+                self._suspend_native("source_session_unavailable")
+            else:
+                self._fail_native(reason="registration_changed")
             self.normal_operations.clear()
-        return valid
+        return valid is True
 
     def _status(self):
         verified_own = (isinstance(self.last_custom_receipt, dict)
@@ -565,7 +614,8 @@ class Gateway:
                         and self.last_custom_receipt.get("origin") == "custom"
                         and self.last_custom_receipt.get("person_id") == self.person_id)
         return {"mode": self._mode(), "person_id": self.person_id,
-                "remaining_seconds": (max(0, self.resume_entitlement["deadline"] - self.clock())
+                "remaining_seconds": (self.warmup_seconds if self.restart_pending and self.suspended else
+                    max(0, self.resume_entitlement["deadline"] - self.clock())
                     if self.suspended and self.resume_entitlement else
                     max(0, self.normal_after - self.clock()) if self._mode() == "warmup" else 0),
                 "last_custom_receipt": self.last_custom_receipt,
@@ -585,6 +635,12 @@ class Gateway:
                 "resume_intent_id": self.resume_entitlement["intent_id"] if self.resume_entitlement else None,
                 "suspended": self.suspended,
                 "suspend_reason": self.suspend_reason,
+                "durable_resume_supported": self.authorizations is not None,
+                "authorization_generation": self.authorizations.generation if self.authorizations else None,
+                "authorization_scopes": self.authorizations.data["scopes"] if self.authorizations else [],
+                "authorization_active_id": self.authorizations.active if self.authorizations else None,
+                "authorization_error": self.authorizations.error if self.authorizations else None,
+                "restart_pending": self.restart_pending,
                 "handoff": {key: self.handoff[key] for key in ("id", "state")} if self.handoff else None,
                 "phone_phase": self.phone_pending.get("phase") if self.phone_pending else None}
 
@@ -870,8 +926,9 @@ class Gateway:
         if request.headers.get("Content-Encoding", "identity") != "identity":
             raise ValueError("encoding")
         body = await request.read()
-        if len(body) > self.max_body_bytes:
-            raise web.HTTPRequestEntityTooLarge(max_size=self.max_body_bytes, actual_size=len(body))
+        limit = MAX_AUTHORITY_BYTES if request.path == "/control/authorizations" else self.max_body_bytes
+        if len(body) > limit:
+            raise web.HTTPRequestEntityTooLarge(max_size=limit, actual_size=len(body))
         return _json(body)
 
     def _operation(self, key, point):
@@ -940,7 +997,8 @@ class Gateway:
 
     def _admission_identity(self):
         return (self.normal_grant, self.source_session, self.admission_generation,
-                self.resume_entitlement["intent_id"] if self.resume_entitlement else None)
+                self.resume_entitlement["intent_id"] if self.resume_entitlement else None,
+                self.authorizations.generation if self.authorizations else None)
 
     def _revoke_resume(self, reason=None):
         self.resume_entitlement = None
@@ -953,13 +1011,21 @@ class Gateway:
             self._fail_native()
             return
         self.suspended, self.suspend_reason = True, reason
+        if self.restart_pending:
+            self._restart_sample = None
+            self.resume_entitlement["deadline"] = self.clock() + self.warmup_seconds
         self.admission_generation += 1
         self.mode, self.normal_after, self.last_phone_receipt = "custom", None, None
         self.source_session = self.normal_grant = self.proven_phone = None
         self.normal_operations.clear()
 
-    def _fail_native(self, *, reason=None):
+    def _fail_native(self, *, reason=None, revoke_authority=True):
         self._revoke_resume(reason or ("native_outcome_unknown" if self.upstream_uncertain else None))
+        if revoke_authority and self.authorizations is not None:
+            try:
+                self.authorizations.revoke_active()
+            except OSError:
+                pass  # Missing durable ACK remains visible; RAM is closed immediately.
         self.mode, self.normal_after, self.last_phone_receipt = "custom", None, None
         self.source_session = None
         self.normal_grant = self.proven_phone = None
@@ -1084,6 +1150,8 @@ class Gateway:
             if self.history_correction is None:
                 await self._ensure_source_session()
             return web.json_response(self._status())
+        if request.path == "/control/authorizations":
+            return await self._control_authorizations(request)
         if request.path == "/control/history-correction":
             return await self._control_history_correction(request)
         if self.history_correction is not None:
@@ -1135,7 +1203,10 @@ class Gateway:
                 if not valid:
                     return web.json_response({"error": "source control session unavailable", **self._status()}, status=503)
             self._fail_native()
+            if self.authorizations is not None and self.authorizations.error == "write_failed":
+                return web.json_response({"error": "authorization revocation unconfirmed", **self._status()}, status=503)
         request_generation = self.admission_generation
+        authorization_generation = self.authorizations.generation if self.authorizations else None
         if self.recovery_active or self._recoverable() or (request.path == "/control/normal" and self.upstream_uncertain):
             return web.json_response({"error": "own recovery pending or upstream uncertain", **self._status()}, status=503)
         async with self.lock:
@@ -1147,8 +1218,12 @@ class Gateway:
             if request.path == "/control/normal":
                 if "point" in body:
                     raise ValueError("normal schema")
-                if request_generation != self.admission_generation:
+                if (request_generation != self.admission_generation or self.authorizations is not None
+                        and authorization_generation != self.authorizations.generation):
                     return web.json_response({"error": "normal consent changed", **self._status()}, status=409)
+                if self.authorizations is not None and (
+                        self.authorizations.scope(intent_id) is None or self.authorizations.error is not None):
+                    return web.json_response({"error": "durable authorization missing", **self._status()}, status=409)
                 active_intent = self.resume_entitlement["intent_id"] if self.resume_entitlement else None
                 if (intent_id in self.used_normal_intents and (
                         intent_id != active_intent or key != self.normal_grant)
@@ -1170,11 +1245,12 @@ class Gateway:
                 if intent_id is not None:
                     if not self._return_id(source_session):
                         raise ValueError("normal source session required")
-                    if await self.normal_intent_check(intent_id, source_session, opening=True) is not True:
+                    if await self._check_normal_intent(intent_id, source_session, opening=True) is not True:
                         return web.json_response({"error": "normal intent unavailable", **self._status()}, status=503)
                 # Validation above awaits HA; expiry/CAS must be checked again afterwards.
                 self._expire_return()
-                if request_generation != self.admission_generation:
+                if (request_generation != self.admission_generation or self.authorizations is not None
+                        and authorization_generation != self.authorizations.generation):
                     return web.json_response({"error": "normal consent changed", **self._status()}, status=409)
                 if self._return_dirty:
                     return web.json_response({"error": "scheduled return persistence pending", **self._status()}, status=503)
@@ -1183,7 +1259,17 @@ class Gateway:
                         self.scheduled_return is not None and self.scheduled_return["state"] in {"due", "applied"})):
                     return web.json_response({"error": "scheduled return changed", **self._status()}, status=409)
                 if key not in self.normal_operations:
+                    if self.authorizations is not None and self.authorizations.active != intent_id:
+                        try:
+                            self.authorizations.write(self.authorizations.data["scopes"], intent_id)
+                        except OSError:
+                            self._fail_native()
+                            raise
                     self._revoke_resume()
+                    self._restart_sample = None
+                    if self.restart_pending and not self._restart_clock_valid():
+                        self._fail_native()
+                        return web.json_response({"error": "startup clock unavailable", **self._status()}, status=503)
                     self.mode, self.normal_after = "warmup", self.clock() + self.warmup_seconds
                     self.source_session = source_session
                     self.last_phone_receipt = None
@@ -1221,6 +1307,63 @@ class Gateway:
             self._complete_custom(point, operation, receipt)
             return web.json_response({"receipt": receipt, "idempotent": False})
 
+    async def _control_authorizations(self, request):
+        authority = self.authorizations
+        if authority is None:
+            return web.json_response({"error": "durable authorizations unsupported"}, status=503)
+        if request.method != "POST":
+            return web.json_response({"error": "unsupported control"}, status=405)
+        body = await self._read_json(request)
+        if (not isinstance(body, dict) or set(body) != {
+                "source_session", "idempotency_key", "expected_generation", "phase", "scopes"}
+                or any(not self._return_id(body[key]) for key in (
+                    "source_session", "idempotency_key", "expected_generation"))
+                or body["phase"] not in {"restrict", "grant"}):
+            raise ValueError("authorization request")
+        desired = authorization_scopes(body["scopes"], self.person_id)
+        generation, admission = authority.generation, self.admission_generation
+        if (self.source_control_check is None
+                or not await self.source_control_check(body["source_session"])):
+            return web.json_response({"error": "authorization source unavailable", **self._status()}, status=503)
+        if (generation != authority.generation or admission != self.admission_generation):
+            return web.json_response({"error": "authorizations changed", **self._status()}, status=409)
+        if authority.repeated(body):
+            return web.json_response(self._status())
+        if body["expected_generation"] != generation:
+            return web.json_response({"error": "authorization generation changed", **self._status()}, status=409)
+        existing = {item["id"]: item for item in authority.data["scopes"]}
+        target = {item["id"]: item for item in desired}
+        if body["phase"] == "restrict":
+            if any(existing.get(key) != value for key, value in target.items()):
+                return web.json_response({"error": "restrict cannot grant permissions", **self._status()}, status=409)
+            if authority.active is not None and authority.active not in target:
+                # Stop already admitted work before waiting for the native writer.
+                self._fail_native(revoke_authority=False)
+            else:
+                # Also fence a pending Normal/grant that has not become active yet.
+                self.admission_generation += 1
+            admission = self.admission_generation
+        else:
+            if any(target.get(key) != value for key, value in existing.items()):
+                return web.json_response({"error": "grant cannot replace permissions", **self._status()}, status=409)
+            if await self.authorization_check(body) is not True:
+                return web.json_response({"error": "explicit authorization witness unavailable", **self._status()}, status=409)
+        async with self.lock:
+            if (generation != authority.generation or admission != self.admission_generation):
+                return web.json_response({"error": "authorizations changed", **self._status()}, status=409)
+            if not await self.source_control_check(body["source_session"]):
+                return web.json_response({"error": "authorization source unavailable", **self._status()}, status=503)
+            if body["phase"] == "grant" and await self.authorization_check(body) is not True:
+                return web.json_response({"error": "explicit authorization witness unavailable", **self._status()}, status=409)
+            if (generation != authority.generation or admission != self.admission_generation):
+                return web.json_response({"error": "authorizations changed", **self._status()}, status=409)
+            try:
+                authority.write(desired, authority.active if authority.active in target else None, operation=body)
+            except OSError:
+                self._fail_native(revoke_authority=False)
+                raise
+            return web.json_response(self._status())
+
     async def _control_resume(self, request):
         if request.method != "POST":
             return web.json_response({"error": "unsupported control"}, status=405)
@@ -1231,10 +1374,14 @@ class Gateway:
             raise ValueError("resume schema")
         async with self.lock:
             entitlement, generation = self.resume_entitlement, self.admission_generation
+            authorization_generation = self.authorizations.generation if self.authorizations else None
             def current():
                 self._expire_return()
                 return (entitlement is not None and self.resume_entitlement is entitlement
                         and generation == self.admission_generation and entitlement["intent_id"] == body["intent_id"]
+                        and (self.authorizations is None or (self.authorizations.error is None
+                            and self.authorizations.generation == authorization_generation
+                            and self.authorizations.active == body["intent_id"]))
                         and body["expected_id"] == (self.scheduled_return["id"] if self.scheduled_return else None)
                         and not self.upstream_uncertain and not self.history_correction and not self.phone_pending
                         and not self.replay_required and not self._handoff_pending() and not self._handoff_dirty)
@@ -1248,7 +1395,7 @@ class Gateway:
             try:
                 if not await self._ensure_registration() or not current():
                     return web.json_response({"error": "resume registration unavailable", **self._status()}, status=503)
-                valid = await self.normal_intent_check(body["intent_id"], body["source_session"], opening=True)
+                valid = await self._check_normal_intent(body["intent_id"], body["source_session"], opening=True)
                 if not current() or valid is not True:
                     return web.json_response({"error": "resume intent unavailable", **self._status()}, status=409)
                 boot = await self.core_boot()
@@ -1259,8 +1406,14 @@ class Gateway:
             if not repeated:
                 self.admission_generation += 1
                 self.suspended, self.suspend_reason = False, None
+                if self.restart_pending:
+                    entitlement["deadline"] = self.clock() + self.warmup_seconds
+                    self._restart_sample = None
+                    if not self._restart_clock_valid():
+                        self._suspend_native("source_session_unavailable")
+                        return web.json_response({"error": "startup clock unavailable", **self._status()}, status=503)
                 self.normal_after = entitlement["deadline"]
-                self.mode = "normal" if self.clock() >= self.normal_after else "warmup"
+                self.mode = "normal" if not self.restart_pending and self.clock() >= self.normal_after else "warmup"
                 self.source_session, self.normal_grant = body["source_session"], body["idempotency_key"]
                 self.native_boot, self.proven_phone = boot, None
                 self.normal_operations = {self.normal_grant: self.normal_after}
@@ -1469,6 +1622,8 @@ class Gateway:
         # Revoke before waiting for an already admitted phone holding the native writer.
         if not ack:
             self._fail_native()
+            if self.authorizations is not None and self.authorizations.error == "write_failed":
+                return web.json_response({"error": "authorization revocation unconfirmed", **self._status()}, status=503)
         async with self.lock:
             if self.history_correction is not None:
                 return web.json_response({"error": "history correction pending", **self._status()}, status=503)
